@@ -83,6 +83,10 @@ details summary{cursor:pointer;font-weight:700;padding:4px 0}
 .weekday{display:flex;gap:4px;flex-wrap:wrap}
 .weekday label{font-size:13px;border:1px solid var(--line);border-radius:8px;padding:4px 8px;background:#fff}
 .li{margin:6px 0}
+.hsum{font-size:13px;background:#f4f8ff;border:1px solid #dbe6fb;border-radius:8px;padding:6px 8px}
+.hrow{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;padding:6px 0;border-bottom:1px dashed var(--line);font-size:13px}
+.hrow b{width:18px}
+.hrow input[type=time]{width:auto;min-width:92px;padding:4px 6px;font-size:13px}
 </style>
 </head>
 <body>
@@ -269,10 +273,149 @@ function regionOf(p){
   }
   const a = (p.addr||'').split(' '); return a[1] || a[0] || '기타';
 }
+
+/* ---------- 영업시간 (요일별 · 브레이크타임 · 라스트오더 · 휴무) ----------
+   p.hours = { days: {0~6: {open,close,breaks:[[s,e]],lo,closed}}, nth:[{n:[2,4],dow}], dates:['YYYY-MM-DD'], note }
+   카카오맵 가게 화면의 영업시간 글자를 붙여넣으면 parseHours가 채워요. (카카오 API는 영업시간을 주지 않아요) */
+const ORDER = [1,2,3,4,5,6,0];
+const DOWC = { 일:0, 월:1, 화:2, 수:3, 목:4, 금:5, 토:6 };
+const pad2 = n => String(n).padStart(2, '0');
+function legacyHours(o){
+  if(!(o.open || o.close || (o.closed || []).length)) return null;
+  const days = {}; for(let d = 0; d < 7; d++) days[d] = (o.closed || []).includes(d) ? { closed: true } : { open: o.open || '', close: o.close || '', breaks: [], lo: '' };
+  return { days, nth: [], dates: [] };
+}
+function takeDays(line){
+  let rest = line.replace(/^[\s•·\-\*▶►]+/, ''); const days = new Set(); let took = false;
+  const kw = rest.match(/^(매일|연중무휴|평일|주말)/);
+  if(kw){ ({ 매일:[0,1,2,3,4,5,6], 연중무휴:[0,1,2,3,4,5,6], 평일:[1,2,3,4,5], 주말:[6,0] })[kw[1]].forEach(d => days.add(d)); rest = rest.slice(kw[0].length); took = true; }
+  const tok = /^([월화수목금토일])(?:요일)?(?:\s*\([^)]*\))?(?:\s*[~\-–]\s*([월화수목금토일])(?:요일)?(?:\s*\([^)]*\))?)?/;
+  while(true){
+    const r = took ? rest.replace(/^[\s,·\/및]+/, '') : rest;
+    const m = r.match(tok); if(!m) break;
+    const after = r.slice(m[0].length);
+    if(after && !/^(\s|\d|[,·\/~\-–:(]|휴|정|영|브|라|오|L|l|$)/.test(after)) break;   // '월정리' 같은 단어는 요일 아님
+    if(m[2]){ let i = ORDER.indexOf(DOWC[m[1]]); const j = ORDER.indexOf(DOWC[m[2]]); for(let k = 0; k < 7; k++){ days.add(ORDER[i]); if(i === j) break; i = (i + 1) % 7; } }
+    else days.add(DOWC[m[1]]);
+    rest = after; took = true;
+  }
+  return { days: took ? days : null, rest };
+}
+const T_RANGE = /(\d{1,2})\s*:\s*(\d{2})\s*[~\-–]\s*(익일\s*)?(\d{1,2})\s*:\s*(\d{2})/g;
+function ranges(str){ const out = []; let m; T_RANGE.lastIndex = 0; while((m = T_RANGE.exec(str))){ let e = (+m[4]) * 60 + (+m[5]); const st = (+m[1]) * 60 + (+m[2]); if(m[3] || e <= st) e = 24 * 60; out.push([`${pad2(m[1])}:${m[2]}`, e >= 1440 ? '24:00' : `${pad2(m[4])}:${m[5]}`]); } return out; }
+const RE_BREAK = /브레이크|휴게\s*시간|break|쉬는\s*시간/i, RE_LO = /라스트\s*오더|L\s*\.?\s*O\b|주문\s*마감|입장\s*마감|매표\s*마감/i, RE_CLOSED = /휴무|휴일|휴관|휴점|정기\s*휴|쉽니다|closed/i;
+function parseHours(text, year){
+  const H = { days: {}, nth: [], dates: [], note: '' };
+  const day = d => (H.days[d] = H.days[d] || { open:'', close:'', breaks:[], lo:'', closed:false });
+  const ALL = new Set([0,1,2,3,4,5,6]);
+  let cur = null, pending = null, found = false;
+  const lines = String(text).replace(/\r/g, '').replace(/[～〜]/g, '~').replace(/：/g, ':').split(/\n+/).map(l => l.trim()).filter(Boolean);
+  for(const raw of lines){
+    if(/^(영업\s*시간|운영\s*시간|영업\s*정보|더보기|접기|오늘|영업\s*중|영업\s*전|영업\s*종료|곧\s*영업)$/.test(raw)) continue;
+    const { days, rest } = takeDays(raw);
+    if(days) cur = days;
+    const target = days || cur || ALL;
+    const rs = ranges(rest);
+    const isBreak = RE_BREAK.test(rest), isLO = RE_LO.test(rest), isClosed = RE_CLOSED.test(rest) && !/없음|무휴/.test(rest);
+    // 키워드만 있고 시간은 다음 줄에 오는 경우
+    if(!rs.length && !/\d{1,2}:\d{2}/.test(rest) && (isBreak || isLO) && !isClosed){ pending = isBreak ? 'break' : 'lo'; continue; }
+    if(pending && rs.length && !isBreak && !isLO && !days){ target.forEach(d => { if(pending === 'break') day(d).breaks.push(rs[0]); else day(d).lo = rs[0][0]; }); pending = null; found = true; continue; }
+    pending = null;
+    if(isClosed){
+      let any = false;
+      const wk = rest.match(/매주\s*((?:[월화수목금토일](?:요일)?\s*[,·\/및]?\s*)+)/);
+      if(wk){ [...wk[1].replace(/요일/g, '').matchAll(/[월화수목금토일]/g)].forEach(x => { day(DOWC[x[0]]).closed = true; }); any = true; }
+      const nth = rest.match(/((?:첫|둘|셋|넷|다섯|마지막|\d)\s*(?:째|번째)?(?:\s*[,·및]\s*(?:첫|둘|셋|넷|다섯|마지막|\d)\s*(?:째|번째)?)*)\s*(?:주|번째\s*주)\s*([월화수목금토일])/);
+      if(nth){ const map = { 첫:1, 둘:2, 셋:3, 넷:4, 다섯:5, 마지막:-1 }; const n = [...nth[1].matchAll(/첫|둘|셋|넷|다섯|마지막|\d/g)].map(x => map[x[0]] ?? +x[0]); H.nth.push({ n, dow: DOWC[nth[2]] }); any = true; }
+      [...rest.matchAll(/(\d{1,2})\s*(?:월|\/|\.)\s*(\d{1,2})\s*일?/g)].forEach(x => { const m = +x[1], d = +x[2]; if(m >= 1 && m <= 12 && d >= 1 && d <= 31){ H.dates.push(`${year}-${pad2(m)}-${pad2(d)}`); any = true; } });
+      if(/공휴일/.test(rest)){ H.note = '공휴일 휴무'; any = true; }
+      if(days && !rs.length && !wk && !nth){ days.forEach(d => { day(d).closed = true; }); any = true; }
+      if(any) found = true;
+      if(!rs.length) continue;
+    }
+    if(/24\s*시간/.test(rest) && !rs.length){ target.forEach(d => Object.assign(day(d), { open:'00:00', close:'24:00', closed:false })); found = true; continue; }
+    if(isBreak && rs.length){
+      const bi = rest.search(RE_BREAK);
+      const before = ranges(rest.slice(0, bi)), after = ranges(rest.slice(bi));
+      // "11:00~21:00 브레이크 15:00~17:00" 처럼 한 줄에 같이 있으면 앞은 영업시간
+      if(before.length && after.length){ target.forEach(d => Object.assign(day(d), { open: before[0][0], close: before[0][1], closed:false })); target.forEach(d => day(d).breaks.push(after[0])); }
+      else target.forEach(d => day(d).breaks.push((after[0] || before[0])));
+      found = true; continue;
+    }
+    if(rs.length){
+      target.forEach(d => { const x = day(d); x.closed = false; x.open = rs[0][0]; x.close = rs[rs.length - 1][1]; for(let k = 1; k < rs.length; k++) x.breaks.push([rs[k-1][1], rs[k][0]]); });
+      found = true;
+    }
+    if(isLO){
+      const li = rest.search(RE_LO), tm = /(\d{1,2})\s*:\s*(\d{2})/;
+      const m = rest.slice(li).match(tm) || (!rs.length ? rest.slice(0, li).match(tm) : null);   // "19:30 라스트오더"처럼 시간이 앞에 와도
+      if(m){ target.forEach(d => { day(d).lo = `${pad2(m[1])}:${m[2]}`; }); found = true; }
+    }
+  }
+  // 브레이크·라스트오더만 있고 영업시간 줄이 없는 요일은 정리
+  Object.values(H.days).forEach(x => { x.breaks = x.breaks.filter((b, i, a) => a.findIndex(y => y[0] === b[0] && y[1] === b[1]) === i); });
+  H.dates = [...new Set(H.dates)];
+  return found ? H : null;
+}
+function nthMatch(date, ns){
+  const d = date.getDate(), wk = Math.ceil(d / 7), dim = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+  return ns.some(n => n === -1 ? d + 7 > dim : n === wk);
+}
+function dayHours(p, date){
+  const dow = date.getDay(), H = p.hours;
+  const x = H && H.days ? H.days[dow] : null;
+  let closed = !!(x && x.closed);
+  if(H){ if((H.dates || []).includes(iso(date))) closed = true; (H.nth || []).forEach(r => { if(r.dow === dow && nthMatch(date, r.n)) closed = true; }); }
+  const open = x && !x.closed ? toMin(x.open) : null; let close = x && !x.closed ? toMin(x.close) : null;
+  if(open != null && close != null && close <= open) close = 24 * 60;
+  return { closed, open, close, breaks: x && !x.closed ? (x.breaks || []).map(b => [toMin(b[0]), toMin(b[1])]).filter(b => b[0] != null && b[1] != null) : [], lo: x && !x.closed ? toMin(x.lo) : null };
+}
+/* 도착 시각 기준으로 실제 방문 가능한 시간 — 휴무·오픈 전·브레이크타임·라스트오더·마감 반영 */
+function fitVisit(p, date, arrive){
+  const h = dayHours(p, date); if(h.closed) return { ok:false, why:'휴무' };
+  const stay = +p.stay || 0, food = p.cat === 'food';
+  let start = h.open != null ? Math.max(arrive, h.open) : arrive, why = start > arrive ? '오픈 전' : '';
+  for(let k = 0; k < 4; k++){
+    let moved = false;
+    for(const [bs, be] of h.breaks){
+      const inside = start >= bs && start < be;
+      const spills = start < bs && (food ? start > bs - 30 : start + stay > bs);   // 식당은 브레이크 30분 전까지 입장, 그 외는 브레이크 전에 끝나야
+      if(inside || spills){ start = be; moved = true; why = '브레이크타임'; }
+    }
+    if(!moved) break;
+  }
+  const end = start + stay;
+  if(h.lo != null && food && start > h.lo) return { ok:false, why:'라스트오더 지남' };
+  if(h.close != null && (food ? start > h.close - 30 : end > h.close)) return { ok:false, why:'영업 종료' };
+  return { ok:true, start, end, wait: start - arrive, why };
+}
+function hoursSummary(p, short){
+  const H = p.hours; if(!H) return '';
+  const fmtD = x => !x ? '?' : x.closed ? 'X' : [x.open || '?', x.close || '?', (x.breaks || []).map(b => b.join('–')).join(', '), x.lo || ''].join('|');
+  const groups = new Map();
+  ORDER.forEach(d => { const k = fmtD(H.days[d]); if(k === '?') return; if(!groups.has(k)) groups.set(k, []); groups.get(k).push(d); });
+  const lab = ds => {
+    if(ds.length === 7) return '매일';
+    const idx = ds.map(d => ORDER.indexOf(d)).sort((a,b) => a-b), parts = []; let i = 0;
+    while(i < idx.length){ let j = i; while(j + 1 < idx.length && idx[j+1] === idx[j] + 1) j++; parts.push(j - i >= 2 ? `${WD[ORDER[idx[i]]]}~${WD[ORDER[idx[j]]]}` : idx.slice(i, j+1).map(x => WD[ORDER[x]]).join('·')); i = j + 1; }
+    return parts.join('·');
+  };
+  const out = [];
+  [...groups.entries()].sort((a, b) => (a[0] === 'X') - (b[0] === 'X')).forEach(([k, ds]) => {
+    if(k === 'X'){ out.push(`${lab(ds)} 휴무`); return; }
+    const [o, c, br, lo] = k.split('|');
+    out.push(`${lab(ds)} ${o}–${c}` + (br ? ` (브레이크 ${br})` : '') + (lo && !short ? ` L.O ${lo}` : ''));
+  });
+  (H.nth || []).forEach(r => out.push(`매월 ${r.n.map(n => n === -1 ? '마지막' : n + '째').join('·')} ${WD[r.dow]} 휴무`));
+  (H.dates || []).forEach(d => out.push(`${dLabelS(d)} 휴무`));
+  if(H.note) out.push(H.note);
+  return out.join(' · ');
+}
+
 function makePlace(o){
   const cat = o.cat || 'sight';
   return { id: o.id || uid(), name: o.name, cat, kid: !!o.kid, must: !!o.must, addr: o.addr || '', lat: +o.lat, lng: +o.lng,
-    placeId: o.placeId || '', stay: o.stay ?? CATS[cat].stay, open: o.open || '', close: o.close || '', closed: o.closed || [],
+    placeId: o.placeId || '', stay: o.stay ?? CATS[cat].stay, hours: o.hours || legacyHours(o), hoursRaw: o.hoursRaw || '', _stayEdited: !!o._stayEdited,
     sample: !!o.sample, approx: !!o.approx, memo: o.memo || '', fixDate: o.fixDate || '' };
 }
 
@@ -293,7 +436,7 @@ function normTrip(t){
   return t;
 }
 const S = {
-  places: LS.get('jm.places', null),
+  places: (LS.get('jm.places', null) || null)?.map(makePlace) || null,
   trip: normTrip(LS.get('jm.trip', null)),
   settings: LS.get('jm.settings', {kakaoKey:'', openaiKey:'', model:'gpt-4o-mini'}),
   excluded: LS.get('jm.excluded', []),
@@ -431,7 +574,7 @@ function renderMapTab(){
 }
 function placeRow(p){
   const c = CATS[p.cat];
-  const badges = (p.fixDate ? `<span class="badge fix">📅 ${dLabelS(p.fixDate)} 고정</span>` : '') + (p.kid ? '<span class="badge">👶</span>' : '') + (p.must ? '<span class="badge">⭐ 꼭</span>' : '') + (p.approx ? '<span class="badge warn">📍대략 위치</span>' : '') + (p.open ? `<span class="badge">${p.open}~${p.close||''}</span>` : '') + (p.closed.length ? `<span class="badge">${p.closed.map(d=>WD[d]).join('')} 휴무</span>` : '');
+  const badges = (p.fixDate ? `<span class="badge fix">📅 ${dLabelS(p.fixDate)} 고정</span>` : '') + (p.kid ? '<span class="badge">👶</span>' : '') + (p.must ? '<span class="badge">⭐ 꼭</span>' : '') + (p.approx ? '<span class="badge warn">📍대략 위치</span>' : '') + ((p.cat === 'food' || p.cat === 'cafe') && !p.hours ? '<span class="badge warn">🕘 영업시간 없음</span>' : '');
   let edit = '';
   if(S.editing === p.id){
     edit = `<div class="edit">
@@ -445,22 +588,17 @@ function placeRow(p){
         <div class="grow"><label class="f">카테고리</label><select onchange="upd('${p.id}','cat',this.value)">${Object.entries(CATS).map(([k,cc]) => `<option value="${k}" ${k===p.cat?'selected':''}>${cc.emoji} ${cc.label}</option>`).join('')}</select></div>
         <div class="grow"><label class="f">머무는 시간(분)</label><input type="number" value="${p.stay}" onchange="upd('${p.id}','stay',+this.value)"></div>
       </div>
-      <div class="row">
-        <div class="grow"><label class="f">여는 시간</label><input type="time" value="${p.open}" onchange="upd('${p.id}','open',this.value)"></div>
-        <div class="grow"><label class="f">닫는 시간</label><input type="time" value="${p.close}" onchange="upd('${p.id}','close',this.value)"></div>
-      </div>
+      ${p.cat !== 'stay' ? hoursEditor(p) : ''}
       <label class="f">메모</label>
       <textarea style="min-height:44px" placeholder="예: 웨이팅 길어서 오픈런, 주차는 뒤쪽" onchange="upd('${p.id}','memo',this.value.trim(),true)">${esc(p.memo)}</textarea>
       ${p.cat !== 'stay' ? `<label class="f">📅 이 날 꼭 넣기</label>${fixSelect(p)}` : ''}
-      <label class="f">휴무 요일</label>
-      <div class="weekday">${WD.map((w,i) => `<label><input type="checkbox" ${p.closed.includes(i)?'checked':''} onchange="toggleClosed('${p.id}',${i})"> ${w}</label>`).join('')}</div>
       <div class="toggle"><input type="checkbox" id="k_${p.id}" ${p.kid?'checked':''} onchange="upd('${p.id}','kid',this.checked)"><label for="k_${p.id}">👶 아이와 갈 곳</label></div>
       <div class="toggle"><input type="checkbox" id="m_${p.id}" ${p.must?'checked':''} onchange="upd('${p.id}','must',this.checked)"><label for="m_${p.id}">⭐ 여기 꼭 넣기</label></div>
       <div class="row"><a class="btn sm" href="${kakaoLink(p)}" target="_blank" rel="noopener">카카오맵에서 보기</a><button class="btn sm ghost" onclick="delPlace('${p.id}')">삭제</button></div>
     </div>`;
   }
   return `<div class="place"><div class="dot" style="background:${c.color}22">${c.emoji}</div>
-    <div class="grow"><div class="pname">${esc(p.name)}${badges}</div><div class="muted">${esc(p.addr)}</div>${p.memo && S.editing !== p.id ? `<div class="pmemo">💬 ${esc(p.memo)}</div>` : ''}${edit}</div>
+    <div class="grow"><div class="pname">${esc(p.name)}${badges}</div><div class="muted">${esc(p.addr)}</div>${p.hours && S.editing !== p.id ? `<div class="muted">🕘 ${esc(hoursSummary(p, true))}</div>` : ''}${p.memo && S.editing !== p.id ? `<div class="pmemo">💬 ${esc(p.memo)}</div>` : ''}${edit}</div>
     <button class="btn sm ghost" onclick="S.editing=S.editing==='${p.id}'?null:'${p.id}';renderMapTab()">${S.editing===p.id?'닫기':'편집'}</button></div>`;
 }
 function upd(id, k, v, quiet){ const p = byId(id); if(!p) return; p[k] = v; if(k === 'cat' && !p._stayEdited) p.stay = CATS[v].stay; if(k === 'stay') p._stayEdited = true; save(); if(!quiet) renderMapTab(); }
@@ -475,7 +613,63 @@ function geocodeManual(){
     if(full) document.getElementById('mAddr').value = full; toast('좌표를 찾았어요');
   });
 }
-function toggleClosed(id, d){ const p = byId(id); p.closed = p.closed.includes(d) ? p.closed.filter(x => x !== d) : [...p.closed, d]; save(); }
+function pastePanel(p, taId, link){
+  return `<div class="sub-card">
+    <div style="font-size:13px"><b>🕘 영업시간·브레이크타임·휴무</b><br>① <a href="${link}" target="_blank" rel="noopener">카카오맵에서 영업시간 보기 ↗</a> ② 영업시간 부분을 길게 눌러 복사 ③ 아래에 붙여넣기</div>
+    <textarea id="${taId}" style="margin-top:6px;min-height:70px" placeholder="예)\n월~금 11:00 ~ 21:00\n브레이크타임 15:00 ~ 17:00\n라스트오더 20:00\n매주 화요일 휴무">${esc(p.hoursRaw || '')}</textarea>
+    <div class="row" style="margin-top:6px">
+      <button class="btn sm" onclick="pasteClip('${taId}')">📋 클립보드에서 붙여넣기</button>
+      <button class="btn sm primary" onclick="applyHoursPaste('${p.id}','${taId}')">자동 인식</button>
+    </div></div>`;
+}
+function hoursEditor(p){
+  const H = p.hours || { days:{}, nth:[], dates:[] };
+  const rows = ORDER.map(d => { const x = H.days[d] || {}; const b = (x.breaks || [])[0] || ['', ''];
+    return `<div class="hrow"><b>${WD[d]}</b>
+      <label class="muted"><input type="checkbox" ${x.closed ? 'checked' : ''} onchange="setDayH('${p.id}',${d},'closed',this.checked)"> 휴무</label>
+      <input type="time" value="${x.open || ''}" onchange="setDayH('${p.id}',${d},'open',this.value)"><span>~</span><input type="time" value="${x.close || ''}" onchange="setDayH('${p.id}',${d},'close',this.value)">
+      <span class="muted">브레이크</span><input type="time" value="${b[0]}" onchange="setDayH('${p.id}',${d},'bs',this.value)"><span>~</span><input type="time" value="${b[1]}" onchange="setDayH('${p.id}',${d},'be',this.value)">
+      <span class="muted">L.O</span><input type="time" value="${x.lo || ''}" onchange="setDayH('${p.id}',${d},'lo',this.value)"></div>`; }).join('');
+  return `<label class="f">🕘 영업시간</label>
+    <div class="hsum">${p.hours ? esc(hoursSummary(p)) : '<span class="muted">아직 없음 — 카카오맵 영업시간을 붙여넣으면 자동으로 채워져요</span>'}</div>
+    ${pastePanel(p, 'hp_' + p.id, kakaoLink(p))}
+    <details><summary style="font-size:13px">요일별로 직접 고치기</summary>${rows}
+      ${p.hours ? `<button class="btn xs ghost" style="margin-top:6px" onclick="clearHours('${p.id}')">영업시간 지우기</button>` : ''}</details>`;
+}
+function setDayH(id, d, k, v){
+  const p = byId(id); if(!p) return;
+  p.hours = p.hours || { days:{}, nth:[], dates:[] };
+  const x = p.hours.days[d] = p.hours.days[d] || { open:'', close:'', breaks:[], lo:'', closed:false };
+  if(k === 'bs' || k === 'be'){ const b = x.breaks[0] || ['', '']; b[k === 'bs' ? 0 : 1] = v; x.breaks = b[0] && b[1] ? [b, ...x.breaks.slice(1)] : (b[0] || b[1] ? [b] : []); }
+  else x[k] = v;
+  save(); const hs = document.querySelector('.hsum'); if(hs) hs.textContent = hoursSummary(p);
+}
+function clearHours(id){ const p = byId(id); p.hours = null; p.hoursRaw = ''; save(); renderMapTab(); toast('영업시간을 지웠어요'); }
+async function pasteClip(taId){
+  try{ const t = await navigator.clipboard.readText(); if(!t) throw 0; document.getElementById(taId).value = t; toast('붙여넣었어요 — 자동 인식을 눌러 주세요'); }
+  catch(e){ toast('칸을 길게 눌러 직접 붙여넣어 주세요'); document.getElementById(taId)?.focus(); }
+}
+async function applyHoursPaste(id, taId){
+  const p = byId(id), text = (document.getElementById(taId)?.value || '').trim();
+  if(!p || !text){ toast('영업시간 글자를 붙여넣어 주세요'); return; }
+  let H = parseHours(text, (S.trip.start || iso(new Date())).slice(0, 4));
+  if(!H && S.settings.openaiKey){ toast('AI로 읽는 중…'); H = await aiParseHours(text).catch(() => null); }
+  if(!H){ toast('영업시간을 못 읽었어요. 요일별로 직접 고쳐 주세요'); return; }
+  p.hours = H; p.hoursRaw = text; save();
+  S.pasteFor = null; if(lastResults.length) renderResults(); renderMapTab();
+  toast('🕘 ' + hoursSummary(p, true));
+}
+async function aiParseHours(text){
+  const r = await fetch('https://api.openai.com/v1/chat/completions', { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + S.settings.openaiKey },
+    body: JSON.stringify({ model: S.settings.model || 'gpt-4o-mini', temperature: 0, response_format:{ type:'json_object' }, messages:[
+      { role:'system', content:'가게 영업시간 글을 JSON으로 바꿔. 형식: {"days":{"0":{"open":"HH:MM","close":"HH:MM","breaks":[["HH:MM","HH:MM"]],"lo":"HH:MM","closed":false},...},"nth":[{"n":[2,4],"dow":2}],"dates":["YYYY-MM-DD"]}. 요일 번호 0=일 1=월 … 6=토. 모르는 요일은 빼. 자정 넘으면 close는 "24:00". 연도는 ' + (S.trip.start || '').slice(0,4) + '.' },
+      { role:'user', content: text } ] }) });
+  if(!r.ok) throw new Error(r.status);
+  const j = JSON.parse((await r.json()).choices[0].message.content);
+  if(!j.days || !Object.keys(j.days).length) return null;
+  const days = {}; Object.entries(j.days).forEach(([k, v]) => { days[+k] = { open: v.open || '', close: v.close || '', breaks: v.breaks || [], lo: v.lo || '', closed: !!v.closed }; });
+  return { days, nth: j.nth || [], dates: j.dates || [], note: '' };
+}
 function delPlace(id){ S.places = S.places.filter(p => p.id !== id); S.trip.stays = S.trip.stays.filter(s => s.placeId !== id); S.editing = null; save(); renderMapTab(); }
 function removeSamples(){ const gone = S.places.filter(p => p.sample).map(p => p.id); S.places = S.places.filter(p => !p.sample); S.trip.stays = S.trip.stays.filter(s => !gone.includes(s.placeId)); save(); renderMapTab(); toast('예시 데이터를 지웠어요'); }
 
@@ -487,23 +681,28 @@ function searchPlaces(){
   box.innerHTML = '<div class="muted">검색 중…</div>';
   new kakao.maps.services.Places().keywordSearch(q, (data, status) => {
     if(status !== kakao.maps.services.Status.OK){ box.innerHTML = '<div class="muted">결과가 없어요. 숙소라면 “직접 입력하기”에서 주소로 찾아보세요.</div>'; return; }
-    lastResults = data;
+    lastResults = data; S.pasteFor = null; renderResults();
+  }, { size: 10 });
+}
+function renderResults(){
+  const box = document.getElementById('results'), data = lastResults;
     box.innerHTML = data.map((d, i) => {
       const cat = mapCat(d);
-      const saved = S.places.some(p => p.placeId === d.id);
+      const saved = S.places.find(p => p.placeId === d.id);
+      const panel = saved && S.pasteFor === d.id ? `<div style="margin:-4px 0 10px 44px">${pastePanel(saved, 'rp_' + i, d.place_url || kakaoLink(saved))}<button class="btn xs ghost" onclick="S.pasteFor=null;renderResults()">나중에 할게요</button></div>` : '';
       return `<div class="place"><div class="dot" style="background:${CATS[cat].color}22">${CATS[cat].emoji}</div>
         <div class="grow"><div class="pname">${esc(d.place_name)}</div><div class="muted">${esc(d.category_name)}<br>${esc(d.road_address_name || d.address_name)}</div></div>
         ${saved ? '' : `<input type="text" id="rm_${i}" placeholder="메모 (선택) — 예: 오픈런, 아이 메뉴 있음" style="margin-top:6px;padding:6px 9px;font-size:13px" onkeydown="if(event.key==='Enter')saveResult(${i})">`}</div>
-        <button class="btn sm ${saved?'':'primary'}" ${saved?'disabled':''} onclick="saveResult(${i})">${saved?'저장됨':'❤️ 저장'}</button></div>`;
+        <button class="btn sm ${saved?'':'primary'}" ${saved?'disabled':''} onclick="saveResult(${i})">${saved?'저장됨':'❤️ 저장'}</button></div>${panel}`;
     }).join('');
-  }, { size: 10 });
 }
 function mapCat(d){ const c = d.category_group_code; return c === 'FD6' ? 'food' : c === 'CE7' ? 'cafe' : c === 'AD5' ? 'stay' : 'sight'; }
 function saveResult(i){
   const d = lastResults[i]; if(!d) return;
   const kid = /테마파크|동물원|아쿠아리움|키즈|체험|놀이|목장|수목원|박물관/.test(d.category_name + d.place_name);
   const p = makePlace({ name: d.place_name, cat: mapCat(d), lat: d.y, lng: d.x, addr: d.road_address_name || d.address_name, placeId: d.id, kid, memo: (document.getElementById('rm_' + i)?.value || '').trim() });
-  S.places.push(p); save(); toast(`${p.name} 저장했어요`); searchPlaces(); renderMapTab();
+  S.places.push(p); save(); toast(`${p.name} 저장했어요`);
+  S.pasteFor = (p.cat === 'stay') ? null : d.id; renderResults(); renderMapTab();
 }
 function addManual(){
   const name = document.getElementById('mName').value.trim();
@@ -772,14 +971,11 @@ function fillSeg(date, t, pos, tg, pool, cs, rng, st){
     const opts = [];
     for(const id of pool){
       const p = byId(id);
-      if(p.closed.includes(date.getDay())) continue;
       if(p.fixDate && p.fixDate !== st.ds && st.tripDates.has(p.fixDate)) continue;   // 다른 날 고정
       const travel = travelMin(pos, p), arrive = t + travel;
-      const open = toMin(p.open), close = toMin(p.close);
-      const start = open != null ? Math.max(arrive, open) : arrive;
-      if(start - arrive > 40) continue;
-      const end = start + (+p.stay || 0);
-      if(close != null && end > close) continue;
+      const v = fitVisit(p, date, arrive);
+      if(!v.ok || v.wait > 40) continue;                                // 휴무·마감·브레이크로 40분 넘게 기다려야 하면 다음 기회에
+      const start = v.start, end = v.end;
       if(end + travelMin(p, tg.pt) > tg.by + tol) continue;
       if(p.cat !== 'food' && end > de) continue;                      // 하루 끝 이후엔 식사만
       if(p.cat === 'food'){
@@ -832,24 +1028,23 @@ function simulateDay(date, plan, segIds){
     (segIds[i] || []).forEach(id => {
       const p = byId(id); if(!p) return;
       const travel = travelMin(pos, p), arrive = t + travel;
-      const open = toMin(p.open), close = toMin(p.close);
-      const start = open != null ? Math.max(arrive, open) : arrive;
-      const end = start + (+p.stay || 0);
-      if(p.closed.includes(date.getDay())) violations.push(`${p.name}: ${WD[date.getDay()]}요일 휴무`);
-      if(close != null && end > close) violations.push(`${p.name}: 영업 종료 후`);
+      const v = fitVisit(p, date, arrive);
+      const start = v.ok ? v.start : arrive, end = start + (+p.stay || 0);
+      if(!v.ok) violations.push(`${p.name}: ${v.why === '휴무' ? WD[date.getDay()] + '요일 휴무' : v.why}`);
       if(p.cat === 'food'){
         const inL = start >= MEAL.lunch[0]-30 && start <= MEAL.lunch[1];
         const inD = start >= MEAL.dinner[0]-30 && start <= MEAL.dinner[1];
         if(!inL && !inD) violations.push(`${p.name}: 식사시간이 아님(${fmt(start)})`);
       }
       if(kid){ kidRun = p.kid && p.cat === 'sight' ? kidRun + 1 : 0; if(kidRun >= 3) violations.push(`${p.name}: 아이 관광지 3연속`); }
-      stops.push({ id, travel, arrive, start, end, wait: start - arrive });
+      stops.push({ id, travel, arrive, start, end, wait: start - arrive, why: v.ok ? v.why : '' });
       t = end; pos = p;
     });
     const travel = travelMin(pos, tg.pt); let arrive = t + travel, idle = 0;
     if(tg.stretch && arrive < tg.by){                 // 너무 일찍 가지 않게: 마지막 장소에 더 머물고 시간 맞춰 출발
       let extra = tg.by - arrive; const ls = stops[stops.length - 1];
-      if(ls){ const lp = byId(ls.id), cl = toMin(lp.close); const ext = cl != null ? Math.max(0, Math.min(extra, cl - ls.end)) : extra; ls.end += ext; ls.extra = ext; extra -= ext; }
+      if(ls){ const h = dayHours(byId(ls.id), date); let cap = h.close != null ? h.close : Infinity; h.breaks.forEach(([bs]) => { if(bs >= ls.end) cap = Math.min(cap, bs); });
+        const ext = isFinite(cap) ? Math.max(0, Math.min(extra, cap - ls.end)) : extra; ls.end += ext; ls.extra = ext; extra -= ext; }
       idle = extra; arrive = tg.by;
     }
     if(tg.hard && arrive > tg.by) violations.push(`${tg.title}: ${fmt(arrive)} 도착 예상 — ${fmt(tg.by)}까지 가야 해요`);
@@ -941,10 +1136,11 @@ function renderCourse(){
   d.segs.forEach(sg => {
     sg.stops.forEach(s => {
       const p = byId(s.id), c = CATS[p.cat], k = `${ds}|s:${p.id}`;
-      h += leg(prev, p, s.travel, s.wait > 0 ? ` · ${s.wait}분 대기(오픈 전)` : '');
+      h += leg(prev, p, s.travel, s.wait > 0 ? ` · ${s.wait}분 대기(${s.why || '오픈 전'})` : '');
       h += `<div class="stop"><div class="time">${fmt(s.start)}–${fmt(s.end)}</div>
         <div class="grow"><div class="pname">${c.emoji} ${esc(p.name)}${p.kid?'<span class="badge">👶</span>':''}${p.must?'<span class="badge">⭐ 꼭</span>':''}</div>
           <div class="muted">${c.label} · ${p.stay + (s.extra || 0)}분 머무름${s.extra ? ` (공항 시간 맞춰 +${s.extra}분)` : ''}</div>
+          ${p.hours ? `<div class="muted" style="font-size:12px">🕘 ${esc(hoursSummary(p, true))}</div>` : ''}
           ${p.memo ? `<div class="pmemo">💬 ${esc(p.memo)}</div>` : ''}${p.fixDate === ds ? '<span class="badge fix" style="margin-left:0">📅 이 날 고정</span>' : ''}
           <div class="acts">
             ${memoBtn(k)}
@@ -1022,13 +1218,13 @@ async function aiRefine(btn){
     trip: { dayStart: S.trip.ds, dayEnd: S.trip.de, car: S.trip.car, kid: kidMode(), people: S.trip.people.length },
     days: C.days.map((d, i) => ({ day: i+1, weekday: WD[d.date.getDay()],
       segments: d.segs.map(sg => ({ from: pt(sg.from), startTime: fmt(sg.t0), to: pt(sg.tg.pt), mustArriveBy: fmt(sg.tg.by), fixed: sg.tg.hard,
-        places: sg.ids.map(id => { const p = byId(id); return { id, name: p.name, cat: p.cat, kid: p.kid, memo: p.memo || undefined, stayMin: +p.stay, open: p.open || null, close: p.close || null, lat: +p.lat.toFixed(4), lng: +p.lng.toFixed(4) }; }) })) }))
+        places: sg.ids.map(id => { const p = byId(id); return { id, name: p.name, cat: p.cat, kid: p.kid, memo: p.memo || undefined, stayMin: +p.stay, hours: p.hours ? hoursSummary(p) : null, lat: +p.lat.toFixed(4), lng: +p.lng.toFixed(4) }; }) })) }))
   };
   const sys = `너는 제주 가족여행 동선 전문가야. 각 날짜는 여러 구간(segment)으로 나뉘고, 구간마다 출발점(from)과 반드시 도착해야 하는 지점(to, mustArriveBy)이 정해져 있어.
 구간 안의 방문 순서만 다듬어. 규칙:
 1) 장소를 추가·삭제하거나 다른 구간·날짜로 옮기지 마. 각 구간의 id를 정확히 한 번씩만 써.
 2) from에서 출발해 to로 가는 방향으로, 되돌아가는 동선을 줄여.
-3) 식당(cat=food)은 11:30~14:00 점심 또는 17:30~19:30 저녁에, 카페는 점심 뒤 오후에.
+3) 식당(cat=food)은 11:30~14:00 점심 또는 17:30~19:30 저녁에, 카페는 점심 뒤 오후에. hours(영업시간·브레이크타임·휴무)에 걸리지 않게.
 4) 아이 동반이면 kid=true 관광지를 3개 연속 두지 마.
 JSON으로만 답해: {"days":[{"day":1,"segments":[["id",...],["id",...]],"comment":"이 날 동선 특징 한 문장"}],"overall":"전체 코스 한 문장 요약"}`;
   btn.disabled = true; btn.textContent = '✨ 다듬는 중…';
