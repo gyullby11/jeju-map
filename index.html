@@ -72,6 +72,9 @@ label.f{display:block;font-size:12px;color:var(--sub);margin:8px 0 3px}
 #chatPanel .ctips{display:flex;gap:6px;overflow-x:auto;padding:6px 14px}
 #chatPanel .ctips .chip{white-space:nowrap}
 #chatPanel .cinput{display:flex;gap:6px;padding:8px 14px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--line)}
+.resv{display:inline-block;margin-top:5px;background:#fff0f3;border:1px solid #f9c9d4;color:#9f1239;border-radius:8px;padding:3px 8px;font-size:13px}
+.resvlist{background:#fff;border:1px solid #f9c9d4;border-radius:12px;padding:10px 12px;margin:8px 0;font-size:14px}
+.resvlist div{padding:3px 0;border-bottom:1px dashed #f3dbe1}.resvlist div:last-child{border-bottom:0}
 .dayopts{background:#fff;border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin:8px 0 0}
 .pin{padding:2px 6px;border-radius:999px;color:#fff;font-size:12px;font-weight:700;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.3);white-space:nowrap}
 .place{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line)}
@@ -415,9 +418,29 @@ function dayHours(p, date){
   if(open != null && close != null && close <= open) close = 24 * 60;
   return { closed, open, close, breaks: x && !x.closed ? (x.breaks || []).map(b => [toMin(b[0]), toMin(b[1])]).filter(b => b[0] != null && b[1] != null) : [], lo: x && !x.closed ? toMin(x.lo) : null };
 }
+/* 메모 속 예약: "예약", "예약 18:00", "18시 예약", "10/28 17:30 예약" → { need, time(분) } */
+function resvOf(p, ds){
+  const texts = [S.memos[`${ds}|s:${p.id}`] || '', p.memo || ''];
+  for(const t of texts){
+    if(!/예약|reserv/i.test(t)) continue;
+    const dm = t.match(/(\d{1,2})\s*[\/.월]\s*(\d{1,2})\s*일?/);
+    if(dm && ds && `${pad2(dm[1])}-${pad2(dm[2])}` !== ds.slice(5)) continue;          // 다른 날짜용 예약 메모
+    const tm = t.match(/(\d{1,2})\s*:\s*(\d{2})/) || t.match(/(오후\s*)?(\d{1,2})\s*시\s*(?:(\d{1,2})\s*분|반)?/);
+    let time = null;
+    if(tm){ if(tm[0].includes(':')) time = (+tm[1]) * 60 + (+tm[2]);
+      else { let h = +tm[2]; if(tm[1] || (h < 9 && h >= 1)) h += h < 12 ? 12 : 0; time = h * 60 + (tm[3] ? +tm[3] : /반/.test(tm[0]) ? 30 : 0); } }
+    return { need: true, time, text: t };
+  }
+  return null;
+}
 /* 도착 시각 기준으로 실제 방문 가능한 시간 — 휴무·오픈 전·브레이크타임·라스트오더·마감 반영 */
 function fitVisit(p, date, arrive){
   const h = dayHours(p, date); if(h.closed) return { ok:false, why:'휴무' };
+  const rv = resvOf(p, iso(date));
+  if(rv && rv.time != null){                                                         // 예약 시간이 정해진 곳은 그 시간에
+    if(arrive > rv.time + 15) return { ok:false, why:'예약 시간 지남' };
+    const st0 = Math.max(arrive, rv.time); return { ok:true, start: st0, end: st0 + (+p.stay || 0), wait: st0 - arrive, why: '예약 시간', resv: true };
+  }
   const stay = +p.stay || 0, food = p.cat === 'food';
   let start = h.open != null ? Math.max(arrive, h.open) : arrive, why = start > arrive ? '오픈 전' : '';
   for(let k = 0; k < 4; k++){
@@ -976,7 +999,7 @@ function planDay(date, di, n, fb){
   outb.filter(f => f !== endFlight).forEach(f => {
     const who = flightWho(f);
     plan.waypoints.push({ pt: AIRPORT, by: toMin(f.dep) - T.airBuffer, hard: true, dwell: 10, kind:'wp', key:'wp-' + f.id, icon:'🛫',
-      stretch: true, title:`공항 배웅 — ${who}`, sub:`${f.label || '항공편'} ${f.dep} 출발 · 출발 ${T.airBuffer}분 전 도착`, leave: flightPeopleIds(f).length });
+      stretch: true, title:`공항 배웅 — ${who}`, sub:`${f.label || '항공편'} ${f.dep} 출발 · <b>출발 ${T.airBuffer}분 전 공항 도착 필수</b>`, leave: flightPeopleIds(f).length });
   });
   if(!isFirst) inb.forEach(f => {
     plan.waypoints.push({ pt: AIRPORT, by: toMin(f.arr) + 30, ready: toMin(f.arr) + 20, hard: false, dwell: 0, kind:'wp', key:'wp-' + f.id, icon:'🛬',
@@ -1029,24 +1052,33 @@ function hasFood(pool){ for(const id of pool){ if(byId(id).cat === 'food') retur
 function fillSeg(date, t, pos, tg, pool, cs, rng, st){
   const de = st.de, kid = kidMode();
   const wantDinner = st.meals.dinner === true || (st.meals.dinner === null && (S.trip.dinner || tg.by >= 18*60 + 30));
+  // 공항 배웅 전 구간이면 이른 저녁(16:30~ 출발 1시간 전 전까지), 아니면 보통 저녁 시간
+  const dinWin = tg.stretch ? [16*60 + 30, Math.min(MEAL.dinner[1], tg.by - 50)] : [MEAL.dinner[0] - 15, MEAL.dinner[1]];
   const tol = tg.hard ? 0 : 10;
-  const ids = [];
+  const ids = [], t0 = t, from = pos;
+  // 배웅 전 이른 저녁: 지금 위치·시각에서 갈 수 있는 저녁 식당이 있으면, 관광지를 고를 때 그 자리를 남겨 둬요
+  const dinnerAfter = (pt, tEnd) => { for(const qid of pool){ const q = byId(qid); if(q.cat !== 'food' || q === pt) continue;
+      const v2 = fitVisit(q, date, Math.max(tEnd + travelMin(pt, q), dinWin[0])); if(!v2.ok || v2.wait > 40) continue;
+      if(v2.start >= dinWin[0] && v2.start <= dinWin[1] && v2.end + travelMin(q, tg.pt) <= tg.by) return true; } return false; };
+  let dinnerReachable = false;
   while(true){
+    dinnerReachable = wantDinner && !st.dinner && tg.stretch && dinnerAfter(pos, t);
     const opts = [];
     for(const id of pool){
       const p = byId(id);
       if(p.fixDate && p.fixDate !== st.ds && st.tripDates.has(p.fixDate)) continue;   // 다른 날 고정
       if(st.indoor && !isIndoor(p) && p.fixDate !== st.ds) continue;                  // 비 오는 날: 실내 위주
       const travel = travelMin(pos, p), arrive = t + travel;
-      const v = fitVisit(p, date, arrive);
-      if(!v.ok || v.wait > 40) continue;                                // 휴무·마감·브레이크로 40분 넘게 기다려야 하면 다음 기회에
+      const early = p.cat === 'food' && wantDinner && !st.dinner && arrive < dinWin[0] && arrive >= dinWin[0] - 45;   // 저녁 시간 조금 전 도착 → 기다렸다 입장
+      const v0 = fitVisit(p, date, early ? dinWin[0] : arrive), v = v0.ok ? { ...v0, wait: v0.start - arrive, why: early && !v0.why ? '저녁 시간' : v0.why } : v0;
+      if(!v.ok || v.wait > (v.resv ? 90 : early ? 45 : 40)) continue;                 // 휴무·마감·브레이크로 오래 기다려야 하면 다음 기회에 (예약은 90분까지)
       const start = v.start, end = v.end;
       if(end + travelMin(p, tg.pt) > tg.by + tol) continue;
       if(p.cat !== 'food' && end > de) continue;                      // 하루 끝 이후엔 식사만
       if(p.cat === 'food'){
         const inB = !st.breakfast && start >= MEAL.breakfast[0] && start <= MEAL.breakfast[1];
         const inL = !st.lunch && start >= MEAL.lunch[0] - 15 && start <= MEAL.lunch[1];
-        const inD = wantDinner && !st.dinner && start >= MEAL.dinner[0] - 15 && start <= MEAL.dinner[1];
+        const inD = wantDinner && !st.dinner && start >= dinWin[0] && start <= dinWin[1];
         if(!inB && !inL && !inD) continue;
         if(st.lastMeal != null && start < st.lastMeal + 150) continue;   // 식사 사이 최소 2시간 30분
       }
@@ -1054,8 +1086,20 @@ function fillSeg(date, t, pos, tg, pool, cs, rng, st){
       if(kid && p.kid && p.cat === 'sight' && st.kidRun >= 2) continue;
       if(p.cat !== 'food' && !st.lunch && t < MEAL.lunch[0] && end > MEAL.lunch[1] && hasFood(pool)) continue;
       if(p.cat !== 'food' && !st.breakfast && t <= MEAL.breakfast[1] - 20 && hasFood(pool)) continue;   // 아침 먹기로 한 날은 아침부터
+      if(p.cat !== 'food' && dinnerReachable && !dinnerAfter(p, end)) continue;   // 여기 들러도 배웅 전 저녁 식당에 제때 갈 수 있을 때만
       const inCluster = cs.has(id);
-      let score = travel + (inCluster ? 0 : 90) + rng()*10;
+      let score;
+      if(st.minDrive){                                                  // 운전 최소화: 가는 길에서 벗어나는 만큼(우회 시간)으로 고르기
+        const detour = travel + travelMin(p, tg.pt) - travelMin(pos, tg.pt);
+        if(detour > 40 && p.fixDate !== st.ds && !v.resv) continue;
+        // 시간이 흐른 만큼만 목적지 쪽으로: 출발점→목적지 사이 '지금쯤 있을 위치'에서 가까운 곳
+        const f = Math.max(0, Math.min(1, (start - t0) / Math.max(60, tg.by - t0)));
+        const ideal = { lat: from.lat + (tg.pt.lat - from.lat) * f, lng: from.lng + (tg.pt.lng - from.lng) * f };
+        score = detour * 2 + roadKm(ideal, p) * 1.5 + rng()*5;
+        const toT = travelMin(p, tg.pt), slack = tg.by - (end + toT);
+        if(toT < 20 && slack > 60) score += (slack - 60) * 0.3;          // 목적지 근처에 너무 일찍 가서 기다리지 않게
+      } else score = travel + (inCluster ? 0 : 90) + rng()*10;
+      if(v.resv) score -= 60;
       if(p.must) score -= inCluster ? 80 : 40;
       if(p.fixDate === st.ds) score -= 150;                              // 이 날 고정 → 최우선
       if(p.cat === 'food') score -= 30;
@@ -1076,7 +1120,7 @@ function fillSeg(date, t, pos, tg, pool, cs, rng, st){
 }
 function buildDay(date, plan, pool, cs, rng){
   const ds0 = iso(date), ml = dayMeals(ds0);
-  const st = { ds: ds0, de: dayEndM(ds0), meals: ml, indoor: !!dayOpt(ds0).indoor, tripDates: new Set(dateRange(S.trip.start, S.trip.end).map(iso)),
+  const st = { ds: ds0, de: dayEndM(ds0), meals: ml, indoor: !!dayOpt(ds0).indoor, minDrive: minDriveOn(ds0, plan), tripDates: new Set(dateRange(S.trip.start, S.trip.end).map(iso)),
     breakfast: !ml.breakfast, lunch: !ml.lunch, dinner: ml.dinner === false, lastMeal: null, cafes:0, kidRun:0, cafeMax: (plan.end.by - plan.start.t) >= 9*60 ? 2 : 1 };
   let t = plan.start.t, pos = plan.start.pt; const segs = [];
   for(const tg of [...plan.waypoints, plan.end]){
@@ -1098,13 +1142,16 @@ function simulateDay(date, plan, segIds){
     (segIds[i] || []).forEach(id => {
       const p = byId(id); if(!p) return;
       const travel = travelMin(pos, p), arrive = t + travel;
-      const v = fitVisit(p, date, arrive);
+      const early = p.cat === 'food' && tg.stretch && arrive < 16*60 + 30 && arrive >= 15*60 + 45 && !stops.some(x => byId(x.id).cat === 'food' && x.start >= 15*60);
+      const v = fitVisit(p, date, early ? 16*60 + 30 : arrive);
       const start = v.ok ? v.start : arrive, end = start + (+p.stay || 0);
+      if(early && v.ok) v.why = v.why || '저녁 시간';
+      const rv = resvOf(p, iso(date)); if(rv && rv.time != null && Math.abs(start - rv.time) > 15) violations.push(`${p.name}: 예약 ${fmt(rv.time)}인데 코스 도착 ${fmt(start)}`);
       if(!v.ok) violations.push(`${p.name}: ${v.why === '휴무' ? WD[date.getDay()] + '요일 휴무' : v.why}`);
       if(p.cat === 'food'){
         const inB = start >= MEAL.breakfast[0] && start <= MEAL.breakfast[1];
         const inL = start >= MEAL.lunch[0]-30 && start <= MEAL.lunch[1];
-        const inD = start >= MEAL.dinner[0]-30 && start <= MEAL.dinner[1];
+        const inD = start >= 16*60 + 30 && start <= MEAL.dinner[1];
         if(!inB && !inL && !inD) violations.push(`${p.name}: 식사시간이 아님(${fmt(start)})`);
       }
       if(kid){ kidRun = p.kid && p.cat === 'sight' ? kidRun + 1 : 0; if(kidRun >= 3) violations.push(`${p.name}: 아이 관광지 3연속`); }
@@ -1115,11 +1162,14 @@ function simulateDay(date, plan, segIds){
     if(tg.stretch && arrive < tg.by){                 // 너무 일찍 가지 않게: 마지막 장소에 더 머물고 시간 맞춰 출발
       let extra = tg.by - arrive; const ls = stops[stops.length - 1];
       if(ls){ const h = dayHours(byId(ls.id), date); let cap = h.close != null ? h.close : Infinity; h.breaks.forEach(([bs]) => { if(bs >= ls.end) cap = Math.min(cap, bs); });
+        cap = Math.min(cap, ls.end + (byId(ls.id).cat === 'food' ? 20 : 60));          // 식당 +20분, 관광지 +60분까지만 더 머물기
         const ext = isFinite(cap) ? Math.max(0, Math.min(extra, cap - ls.end)) : extra; ls.end += ext; ls.extra = ext; extra -= ext; }
       idle = extra; arrive = tg.by;
     }
     if(tg.hard && arrive > tg.by) violations.push(`${tg.title}: ${fmt(arrive)} 도착 예상 — ${fmt(tg.by)}까지 가야 해요`);
     if(!tg.hard && arrive > tg.by + 20) violations.push(`숙소 도착 ${fmt(arrive)} (목표 ${fmt(tg.by)})`);
+    if(tg.stretch){ const ml = dayMeals(iso(date)); const want = ml.dinner === true || (ml.dinner === null && (S.trip.dinner || tg.by >= 18*60 + 30));
+      if(want && !stops.some(x => byId(x.id).cat === 'food' && x.start >= 16*60 + 30)) violations.push(`🍽 공항 가기 전 이른 저녁을 넣을 식당이 동선 근처에 없어요 — 💬 코스 대화에서 "공항 근처 식당 추천해줘"라고 해 보세요`); }
     segs.push({ ids: segIds[i] || [], stops, tg, t0, from, travel, arrive, idle, last: pos });
     t = Math.max(arrive + (tg.dwell || 0), tg.ready || 0); pos = tg.pt; kidRun = 0;
   });
@@ -1234,6 +1284,7 @@ function renderCourse(){
   const head = pl.present.length ? `👥 ${pl.present.length}명${leaveCnt ? ` → ${pl.present.length - leaveCnt}명` : ''}${joinCnt ? ` → ${pl.present.length + joinCnt}명` : ''}` : '';
   let h = `<h2>AI 코스</h2>
     <div class="summary">저장한 ${C.total}곳 중 이번 일정에 맞는 ${used}곳을 골랐어요.</div>
+    ${resvListHtml(C)}
     <div class="muted">${T.car ? `🚗 ${esc(R.model || '렌터카')}` : '🚌 대중교통'} · ${kidMode() ? '👶 아이 동반 · ' : ''}${T.ds}~${T.de} · 이동시간은 거리 기반 추정치예요</div>`;
   if(mustLeft.length) h += `<div class="warn">⭐ 꼭 넣기인데 시간이 모자라 빠진 곳: <b>${mustLeft.map(p => esc(p.name)).join(', ')}</b><br>다른 장소를 하나 빼거나 하루 여행시간을 늘려 보세요.</div>`;
   if(C.aiNote) h += `<div class="ai">✨ ${esc(C.aiNote)}</div>`;
@@ -1245,11 +1296,12 @@ function renderCourse(){
     <div class="days">${C.days.map((x, i) => `<button class="chip ${i===S.day?'on':''}" onclick="S.day=${i};S.memoOpen=null;renderCourse()">DAY ${i+1} · ${dLabel(x.date)} ${wxBadge(x.plan.ds)}</button>`).join('')}</div>
     <h2>DAY ${S.day+1} — ${esc(d.region)}권 <span class="muted" style="font-weight:400">${dLabel(d.date)} ${head}</span></h2>`;
   if(d.comment) h += `<div class="ai">✨ ${esc(d.comment)}</div>`;
-  { const o = dayOpt(ds), ml = dayMeals(ds), w = wxOf(ds), dinnerOn = ml.dinner === true || (ml.dinner === null && T.dinner);
+  { const o = dayOpt(ds), ml = dayMeals(ds), w = wxOf(ds), dinnerAuto = ml.dinner === null && !T.dinner && pl.waypoints.some(x => x.stretch), dinnerOn = ml.dinner === true || (ml.dinner === null && (T.dinner || dinnerAuto));
     h += `<div class="dayopts"><span class="muted">${wxBadge(ds, true)}</span>
       <div class="chips" style="margin-top:6px">
-        ${['breakfast','lunch','dinner'].map(k => { const on = k === 'dinner' ? dinnerOn : ml[k]; return `<button class="chip sm ${on ? 'on' : ''}" onclick="toggleMeal('${ds}','${k}',${!on})">${{breakfast:'🍳',lunch:'🍚',dinner:'🍽'}[k]} ${MEAL_KO[k]}</button>`; }).join('')}
+        ${['breakfast','lunch','dinner'].map(k => { const on = k === 'dinner' ? dinnerOn : ml[k]; return `<button class="chip sm ${on ? 'on' : ''}" onclick="toggleMeal('${ds}','${k}',${!on})">${{breakfast:'🍳',lunch:'🍚',dinner:'🍽'}[k]} ${k === 'dinner' && dinnerAuto ? '이른 저녁 (자동)' : MEAL_KO[k]}</button>`; }).join('')}
         <button class="chip sm ${o.indoor ? 'on' : ''}" onclick="setDayOpt('${ds}',{indoor:${!o.indoor}});regen()">☔ 실내 위주</button>
+        <button class="chip sm ${minDriveOn(ds, pl) ? 'on' : ''}" onclick="setDayOpt('${ds}',{minDrive:${!minDriveOn(ds, pl)}});regen()">🚗 운전 최소화${o.minDrive == null && pl.waypoints.length ? ' (자동)' : ''}</button>
         <span class="muted" style="align-self:center">${fmt(dayStartM(ds))}~${fmt(dayEndM(ds))}</span>
       </div></div>`;
     if(isRainy(w) && !o.indoor) h += `<div class="info">☔ 이 날 비 예보(강수 ${w.pop}%)가 있어요. <button class="btn xs" onclick="setDayOpt('${ds}',{indoor:true});regen()">실내 위주로 바꾸기</button></div>`;
@@ -1279,6 +1331,8 @@ function renderCourse(){
           <div class="muted">${c.label} · ${p.stay + (s.extra || 0)}분 머무름${s.extra ? ` (공항 시간 맞춰 +${s.extra}분)` : ''}</div>
           ${p.hours ? `<div class="muted" style="font-size:12px">🕘 ${esc(hoursSummary(p, true))}</div>` : ''}
           ${p.memo ? `<div class="pmemo">💬 ${esc(p.memo)}</div>` : ''}${p.fixDate === ds ? '<span class="badge fix" style="margin-left:0">📅 이 날 고정</span>' : ''}
+          ${(() => { const rv = resvOf(p, ds); if(!rv) return ''; const cnt = pl.present.length - (sg.tg.kind === 'wp' ? 0 : 0);
+            return `<div class="resv">📞 ${rv.time != null ? `예약 <b>${fmt(rv.time)}</b>${Math.abs(rv.time - s.start) > 15 ? ` · ⚠️ 코스 도착 ${fmt(s.start)}` : ' · 코스에 맞춰 짰어요'}` : `<b>${fmt(s.start)}</b>로 예약하세요`} · ${cnt ? cnt + '명' : ''}${resvKids(ds)}</div>`; })()}
           <div class="acts">
             ${memoBtn(k)}
             <button class="btn xs ghost" onclick="excludeOne('${p.id}')">장소 빼기</button>
@@ -1291,7 +1345,7 @@ function renderCourse(){
     const tg = sg.tg, late = tg.hard && sg.arrive > tg.by;
     h += leg(prev, tg.pt, sg.travel, sg.idle ? ` · 공항 가기 전 ${sg.idle}분 여유` : '');
     if(tg.kind === 'wp'){
-      h += evRow(ds, { key: tg.key, icon: tg.icon, cls: late ? 'alert' : 'air', time: sg.arrive, title: esc(tg.title), sub: `${esc(tg.sub)}${tg.ready ? '' : ` · <b>${fmt(tg.by)}까지</b>`}` });
+      h += evRow(ds, { key: tg.key, icon: tg.icon, cls: late ? 'alert' : 'air', time: sg.arrive, title: esc(tg.title), sub: `${tg.sub}${tg.ready ? '' : ` · ${fmt(tg.by)}까지`}` });
     } else if(tg.kind === 'rent' || tg.kind === 'air'){
       const f = tg.flight, dep = toMin(f.dep);
       let atAir = sg.arrive;
@@ -1336,6 +1390,16 @@ function renderCourse(){
     lg.innerHTML = `<span><i style="background:${color}"></i>번호 = 방문 순서 · 화살표 = 이동 방향 · 숫자 = 구간 이동시간·거리</span>`;
   }
 }
+function resvKids(ds){ const pr = presentAtStart(ds), k = pr.filter(p => p.age !== '' && +p.age <= 12).length; return k ? ` (아이 ${k})` : ''; }
+function resvListHtml(C){
+  const rows = [];
+  C.days.forEach((d, i) => d.segs.forEach(sg => sg.stops.forEach(s => { const p = byId(s.id), rv = p && resvOf(p, d.plan.ds);
+    if(rv) rows.push(`<div><b>DAY ${i+1}</b> ${dLabel(d.date)} · <b>${fmt(rv.time ?? s.start)}</b> ${esc(p.name)} · ${d.plan.present.length}명${resvKids(d.plan.ds)}${rv.time != null && Math.abs(rv.time - s.start) > 15 ? ` <span style="color:#c2410c">⚠️ 코스 도착 ${fmt(s.start)}</span>` : ''}</div>`); })));
+  const notIn = S.places.filter(p => p.memo && /예약/.test(p.memo) && !C.days.some(d => d.ids.includes(p.id)));
+  if(!rows.length && !notIn.length) return '';
+  return `<div class="resvlist">📞 <b>예약 필요</b> — 메모에 "예약"이 있는 곳${rows.join('')}${notIn.length ? `<div class="muted">코스에 안 들어간 예약 메모 장소: ${notIn.map(p => esc(p.name)).join(', ')}</div>` : ''}</div>`;
+}
+function minDriveOn(ds, plan){ const o = dayOpt(ds); if(o.minDrive != null) return !!o.minDrive; return !!(plan && plan.waypoints && plan.waypoints.length); }
 function toggleMeal(ds, k, on){ setDayOpt(ds, { meals: { [k]: on } }); regen(); toast(`${MEAL_KO[k]} ${on ? '넣기' : '빼기'} — 다시 짰어요`); }
 function regen(){ const keep = S.day; generate_(); S.day = Math.min(keep, S.course.days.length - 1); renderCourse(); }
 function fixSelect(p, inCourse){
@@ -1388,6 +1452,7 @@ const CHAT_TOOLS = [
       day:{ type:'integer', description:'1부터 시작하는 DAY 번호' },
       breakfast:{ type:'boolean' }, lunch:{ type:'boolean' }, dinner:{ type:'boolean' },
       indoor_only:{ type:'boolean', description:'true면 실외 관광지를 빼고 실내 위주로' },
+      min_drive:{ type:'boolean', description:'true면 운전(우회) 거리를 최소화' },
       start:{ type:'string', description:'HH:MM 숙소 출발' }, end:{ type:'string', description:'HH:MM 숙소 도착 목표' } }, required:['day'] } },
   { name:'pin_place', description:'저장된 장소를 특정 날짜 코스에 꼭 넣기', parameters:{ type:'object', properties:{ place_id:{ type:'string' }, day:{ type:'integer' } }, required:['place_id','day'] } },
   { name:'unpin_place', description:'날짜 고정 해제', parameters:{ type:'object', properties:{ place_id:{ type:'string' } }, required:['place_id'] } },
@@ -1410,7 +1475,7 @@ async function runTool(name, a){
     case 'set_day_options': {
       const ds = dayDs(a.day); if(!ds) throw new Error('없는 DAY');
       const meals = {}; ['breakfast','lunch','dinner'].forEach(k => { if(a[k] != null) meals[k] = !!a[k]; });
-      const patch = {}; if(Object.keys(meals).length) patch.meals = meals; if(a.indoor_only != null) patch.indoor = !!a.indoor_only;
+      const patch = {}; if(Object.keys(meals).length) patch.meals = meals; if(a.indoor_only != null) patch.indoor = !!a.indoor_only; if(a.min_drive != null) patch.minDrive = !!a.min_drive;
       if(a.start) patch.start = a.start; if(a.end) patch.end = a.end;
       setDayOpt(ds, patch); regen(); return { ok: true, day: daySummary(C().days[dayIdx(a.day)], dayIdx(a.day)) };
     }
@@ -1457,6 +1522,8 @@ const CHAT_SYS = `너는 제주 가족여행 코스를 같이 고치는 여행 �
 - 검색 결과엔 평점·리뷰가 없어. 맛·평점·인기를 지어내지 마. "카카오맵에서 후기를 확인해 보세요"라고 해.
 - 체험은 보통 머무는 시간을 stay_min으로 넣어(예: 승마 60, 감귤따기 60).
 - 변경 후엔 무엇이 바뀌었는지(그 날 장소 순서, 이동시간) 2~4줄로 요약. 넣지 못한 이유가 있으면 말해.
+- 메모에 '예약'과 시간이 있으면 앱이 그 시간에 맞춰 넣어. 예약 시간을 바꾸려면 update_place로 memo를 고쳐(예: '예약 17:30').
+- 공항 배웅·마중 날은 운전 최소화가 자동으로 켜지고, 배웅 전 저녁은 16:30부터 이른 저녁으로 넣어.
 - 비행기·배웅·렌터카 반납 시간은 바꿀 수 없어. 그런 요청은 여행 만들기 탭에서 고치라고 안내해.`;
 async function sendChat(text){
   text = (text || document.getElementById('chatIn')?.value || '').trim(); if(!text || chatBusy) return;
