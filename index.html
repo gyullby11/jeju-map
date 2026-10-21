@@ -75,6 +75,13 @@ label.f{display:block;font-size:12px;color:var(--sub);margin:8px 0 3px}
 .resv{display:inline-block;margin-top:5px;background:#fff0f3;border:1px solid #f9c9d4;color:#9f1239;border-radius:8px;padding:3px 8px;font-size:13px}
 .resvlist{background:#fff;border:1px solid #f9c9d4;border-radius:12px;padding:10px 12px;margin:8px 0;font-size:14px}
 .resvlist div{padding:3px 0;border-bottom:1px dashed #f3dbe1}.resvlist div:last-child{border-bottom:0}
+.reqday h3{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+.reqrow{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:6px 0;border-top:1px dashed var(--line);font-size:14px}
+.reqrow > b{min-width:76px}
+.reqrow input[type=time]{width:auto;min-width:96px;padding:5px 7px}
+.reqrow select{width:auto;max-width:100%;padding:5px 7px}
+.reqchip{display:inline-flex;align-items:center;gap:4px;background:#eef3fb;border:1px solid #dbe6fb;border-radius:999px;padding:2px 4px 2px 10px;font-size:13px}
+.reqchip button{border:0;background:transparent;cursor:pointer;color:#6b7280}
 .dayopts{background:#fff;border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin:8px 0 0}
 .pin{padding:2px 6px;border-radius:999px;color:#fff;font-size:12px;font-weight:700;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.3);white-space:nowrap}
 .place{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line)}
@@ -167,6 +174,9 @@ details summary{cursor:pointer;font-weight:700;padding:4px 0}
     <div id="tripForm"></div>
   </section>
 
+  <!-- ②-1 요청사항 -->
+  <section id="tab-req"><div id="reqArea"></div></section>
+
   <!-- ③ 코스 -->
   <section id="tab-course">
     <div id="courseArea"></div>
@@ -236,7 +246,7 @@ const MEAL_KO = { breakfast:'아침', lunch:'점심', dinner:'저녁' };
 function dayOpt(ds){ return (S.trip.dayOpts || {})[ds] || {}; }
 function dayMeals(ds){ const m = dayOpt(ds).meals || {}; return { breakfast: !!m.breakfast, lunch: m.lunch !== false, dinner: m.dinner != null ? !!m.dinner : null }; }   // dinner null = 자동(설정/배웅 저녁)
 function setDayOpt(ds, patch){ S.trip.dayOpts = S.trip.dayOpts || {}; const o = { ...(S.trip.dayOpts[ds] || {}) };
-  Object.entries(patch).forEach(([k, v]) => { if(k === 'meals') o.meals = { ...(o.meals || {}), ...v }; else if(v === null || v === '') delete o[k]; else o[k] = v; });
+  Object.entries(patch).forEach(([k, v]) => { if(k === 'meals' || k === 'mealAt'){ o[k] = { ...(o[k] || {}), ...v }; Object.keys(o[k]).forEach(x => { if(o[k][x] === null || o[k][x] === '') delete o[k][x]; }); } else if(v === null || v === '') delete o[k]; else o[k] = v; });
   S.trip.dayOpts[ds] = o; save(); }
 const dayStartM = ds => toMin(dayOpt(ds).start) ?? toMin(S.trip.ds);
 const dayEndM = ds => toMin(dayOpt(ds).end) ?? toMin(S.trip.de);
@@ -419,7 +429,27 @@ function dayHours(p, date){
   return { closed, open, close, breaks: x && !x.closed ? (x.breaks || []).map(b => [toMin(b[0]), toMin(b[1])]).filter(b => b[0] != null && b[1] != null) : [], lo: x && !x.closed ? toMin(x.lo) : null };
 }
 /* 메모 속 예약: "예약", "예약 18:00", "18시 예약", "10/28 17:30 예약" → { need, time(분) } */
+/* 요청사항으로 정한 날짜별 고정 일정·포장 들를 곳 */
+const dayFixed = ds => (dayOpt(ds).fixed || []).filter(f => byId(f.placeId));
+const dayPickups = ds => (dayOpt(ds).pickups || []).filter(id => byId(id));
+function allPickupIds(){ const o = S.trip.dayOpts || {}; return new Set(Object.values(o).flatMap(x => x.pickups || [])); }
+function stayOf(p, ds){
+  const f = ds && dayFixed(ds).find(x => x.placeId === p.id);
+  if(f && toMin(f.end) != null && toMin(f.start) != null) return Math.max(10, toMin(f.end) - toMin(f.start));
+  if(ds && dayPickups(ds).includes(p.id)) return +(dayOpt(ds).pickupStay || 20);
+  return +p.stay || 0;
+}
+function mealWins(ds, t0){
+  const at = dayOpt(ds).mealAt || {};
+  const w = { breakfast: [...MEAL.breakfast], lunch: [MEAL.lunch[0] - 15, MEAL.lunch[1]], dinner: [MEAL.dinner[0] - 15, MEAL.dinner[1]] };
+  if(at.breakfast === 'asap') w.breakfast = [t0, t0 + 75]; else if(toMin(at.breakfast) != null){ const m = toMin(at.breakfast); w.breakfast = [m - 30, m + 40]; }
+  ['lunch','dinner'].forEach(k => { const m = toMin(at[k]); if(m != null) w[k] = [m - 30, m + 40]; });
+  return w;
+}
+const dinnerModeOf = ds => dayOpt(ds).dinnerMode || 'auto';    // auto | restaurant | takeout | none
 function resvOf(p, ds){
+  const fx = ds && dayFixed(ds).find(x => x.placeId === p.id);
+  if(fx) return { need: true, time: toMin(fx.start), end: toMin(fx.end), fixed: true, text: '' };
   const texts = [S.memos[`${ds}|s:${p.id}`] || '', p.memo || ''];
   for(const t of texts){
     if(!/예약|reserv/i.test(t)) continue;
@@ -439,9 +469,9 @@ function fitVisit(p, date, arrive){
   const rv = resvOf(p, iso(date));
   if(rv && rv.time != null){                                                         // 예약 시간이 정해진 곳은 그 시간에
     if(arrive > rv.time + 15) return { ok:false, why:'예약 시간 지남' };
-    const st0 = Math.max(arrive, rv.time); return { ok:true, start: st0, end: st0 + (+p.stay || 0), wait: st0 - arrive, why: '예약 시간', resv: true };
+    const st0 = Math.max(arrive, rv.time); return { ok:true, start: st0, end: st0 + stayOf(p, iso(date)), wait: st0 - arrive, why: rv.fixed ? '고정 일정' : '예약 시간', resv: true };
   }
-  const stay = +p.stay || 0, food = p.cat === 'food';
+  const stay = stayOf(p, iso(date)), food = p.cat === 'food';
   let start = h.open != null ? Math.max(arrive, h.open) : arrive, why = start > arrive ? '오픈 전' : '';
   for(let k = 0; k < 4; k++){
     let moved = false;
@@ -632,7 +662,7 @@ let curTab = 'map';
 function go(t){
   curTab = t;
   document.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.id === 'tab-' + t));
-  document.querySelectorAll('nav.tabbar button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  document.querySelectorAll('nav.tabbar button').forEach(b => b.classList.toggle('on', b.dataset.tab === (t === 'req' ? 'trip' : t)));
   try{ window.scrollTo(0, 0); }catch(e){}
   renderAll();
 }
@@ -640,6 +670,7 @@ function renderAll(){
   if(typeof renderChat === 'function') renderChat();
   if(curTab === 'map') renderMapTab();
   if(curTab === 'trip') renderTrip();
+  if(curTab === 'req') renderReq();
   if(curTab === 'course') renderCourse();
   if(curTab === 'settings') renderSettings();
 }
@@ -928,7 +959,8 @@ function renderTrip(){
 
   const checks = tripChecks();
   if(checks.length) h += `<div class="warn"><b>확인해 주세요</b><br>${checks.map(esc).join('<br>')}</div>`;
-  h += `<button class="btn primary" style="width:100%;margin-top:6px" onclick="makeCourse()">AI 코스 만들기 →</button>`;
+  h += `<button class="btn primary" style="width:100%;margin-top:6px" onclick="goReq()">다음: 📝 요청사항 적기 →</button>
+    <button class="btn ghost" style="width:100%;margin-top:6px" onclick="makeCourse()">요청 없이 바로 코스 만들기</button>`;
   document.getElementById('tripForm').innerHTML = h;
 }
 function makeCourse(){
@@ -992,7 +1024,8 @@ function planDay(date, di, n, fb){
     const pt = night || (isLast ? morning : null) || fb;
     const arriving = nS && (!mS || mS.placeId !== nS.placeId);
     const dn = dayMeals(ds).dinner;
-    plan.end = { pt, by: (dn === true || (dn === null && T.dinner)) ? Math.max(dayEndM(ds), 20*60 + 30) : dayEndM(ds), hard: false, kind:'stay', key:'end', title: pt.name, checkin: arriving ? nS.checkin : null };
+    const dm = dinnerModeOf(ds), restDinner = dm === 'restaurant' || (dm === 'auto' && (dn === true || (dn === null && T.dinner)));
+    plan.end = { pt, by: restDinner ? Math.max(dayEndM(ds), 20*60 + 30) : dayEndM(ds), hard: false, kind:'stay', key:'end', title: pt.name, checkin: arriving ? nS.checkin : null };
   }
 
   // --- 중간 공항 배웅 / 마중 ---
@@ -1051,21 +1084,38 @@ function hasFood(pool){ for(const id of pool){ if(byId(id).cat === 'food') retur
 
 function fillSeg(date, t, pos, tg, pool, cs, rng, st){
   const de = st.de, kid = kidMode();
-  const wantDinner = st.meals.dinner === true || (st.meals.dinner === null && (S.trip.dinner || tg.by >= 18*60 + 30));
-  // 공항 배웅 전 구간이면 이른 저녁(16:30~ 출발 1시간 전 전까지), 아니면 보통 저녁 시간
-  const dinWin = tg.stretch ? [16*60 + 30, Math.min(MEAL.dinner[1], tg.by - 50)] : [MEAL.dinner[0] - 15, MEAL.dinner[1]];
+  const dm = dinnerModeOf(st.ds);
+  const wantDinner = dm === 'restaurant' || (dm === 'auto' && (st.meals.dinner === true || (st.meals.dinner === null && (S.trip.dinner || tg.by >= 18*60 + 30))));
+  // 공항 배웅 전 구간이면 이른 저녁(16:30~ 출발 1시간 전 전까지), 아니면 보통 저녁 시간(요청한 시각이 있으면 그 시각)
+  const W = st.win, dinWin = tg.stretch && !(dayOpt(st.ds).mealAt || {}).dinner ? [16*60 + 30, Math.min(MEAL.dinner[1], tg.by - 50)] : W.dinner;
+  const isFinal = tg.kind !== 'wp', pick = new Set(isFinal ? dayPickups(st.ds) : []);
+  // 아직 안 간 고정 일정(예약 시간 있는 곳): 다른 곳 들르다 늦지 않게
+  const pendingFixed = () => [...pool].map(byId).filter(q => (q.fixDate === st.ds || dayFixed(st.ds).some(f => f.placeId === q.id)) && resvOf(q, st.ds)?.time != null);
   const tol = tg.hard ? 0 : 10;
   const ids = [], t0 = t, from = pos;
   // 배웅 전 이른 저녁: 지금 위치·시각에서 갈 수 있는 저녁 식당이 있으면, 관광지를 고를 때 그 자리를 남겨 둬요
   const dinnerAfter = (pt, tEnd) => { for(const qid of pool){ const q = byId(qid); if(q.cat !== 'food' || q === pt) continue;
       const v2 = fitVisit(q, date, Math.max(tEnd + travelMin(pt, q), dinWin[0])); if(!v2.ok || v2.wait > 40) continue;
       if(v2.start >= dinWin[0] && v2.start <= dinWin[1] && v2.end + travelMin(q, tg.pt) <= tg.by) return true; } return false; };
-  let dinnerReachable = false;
+  // 점심도 같은 방식: 여기 들른 뒤 점심 시간 안에 갈 수 있는 식당이 남아 있는지
+  const lunchAfter = (pt, tEnd) => { for(const qid of pool){ const q = byId(qid); if(q.cat !== 'food' || q === pt || pick.has(qid)) continue;
+      const v2 = fitVisit(q, date, Math.max(tEnd + travelMin(pt, q), W.lunch[0])); if(!v2.ok || v2.wait > 40) continue;
+      if(v2.start >= W.lunch[0] && v2.start <= W.lunch[1] && (st.lastMeal == null || v2.start >= st.lastMeal + 150)) return true; } return false; };
+  let dinnerReachable = false, lunchReachable = false;
   while(true){
     dinnerReachable = wantDinner && !st.dinner && tg.stretch && dinnerAfter(pos, t);
-    const opts = [];
+    lunchReachable = !st.lunch && t < W.lunch[1] && lunchAfter(pos, t);
+    const opts = [], popts = [], pend = pendingFixed();
     for(const id of pool){
       const p = byId(id);
+      if(pick.has(id)){                                                 // 포장 들를 곳: 마지막(숙소 가기 직전)에만
+        if(st.wrapId && !st.wrapDone) continue;
+        const tr = travelMin(pos, p), v = fitVisit(p, date, t + tr);
+        if(v.ok && v.wait <= 20 && v.end + travelMin(p, tg.pt) <= tg.by + 60) popts.push({ id, p, end: v.end, score: tr + travelMin(p, tg.pt) });
+        continue;
+      }
+      if(st.allPick.has(id)) continue;                                   // 다른 날 포장용으로 정한 곳은 관광지로 안 씀
+      if(st.wrapDone) continue;                                          // 고정 일정 끝 → 바로 숙소
       if(p.fixDate && p.fixDate !== st.ds && st.tripDates.has(p.fixDate)) continue;   // 다른 날 고정
       if(st.indoor && !isIndoor(p) && p.fixDate !== st.ds) continue;                  // 비 오는 날: 실내 위주
       const travel = travelMin(pos, p), arrive = t + travel;
@@ -1073,19 +1123,20 @@ function fillSeg(date, t, pos, tg, pool, cs, rng, st){
       const v0 = fitVisit(p, date, early ? dinWin[0] : arrive), v = v0.ok ? { ...v0, wait: v0.start - arrive, why: early && !v0.why ? '저녁 시간' : v0.why } : v0;
       if(!v.ok || v.wait > (v.resv ? 90 : early ? 45 : 40)) continue;                 // 휴무·마감·브레이크로 오래 기다려야 하면 다음 기회에 (예약은 90분까지)
       const start = v.start, end = v.end;
-      if(end + travelMin(p, tg.pt) > tg.by + tol) continue;
-      if(p.cat !== 'food' && end > de) continue;                      // 하루 끝 이후엔 식사만
+      if(pend.some(q => q !== p && end + travelMin(p, q) > resvOf(q, st.ds).time + 10)) continue;   // 고정 일정에 늦지 않게
+      if(end + travelMin(p, tg.pt) > tg.by + tol && !(v.resv && dayFixed(st.ds).some(f => f.placeId === p.id))) continue;
+      if(p.cat !== 'food' && end > de && !v.resv) continue;           // 하루 끝 이후엔 식사만 (고정 일정은 예외)
       if(p.cat === 'food'){
-        const inB = !st.breakfast && start >= MEAL.breakfast[0] && start <= MEAL.breakfast[1];
-        const inL = !st.lunch && start >= MEAL.lunch[0] - 15 && start <= MEAL.lunch[1];
+        const inB = !st.breakfast && start >= W.breakfast[0] && start <= W.breakfast[1];
+        const inL = !st.lunch && start >= W.lunch[0] && start <= W.lunch[1];
         const inD = wantDinner && !st.dinner && start >= dinWin[0] && start <= dinWin[1];
         if(!inB && !inL && !inD) continue;
         if(st.lastMeal != null && start < st.lastMeal + 150) continue;   // 식사 사이 최소 2시간 30분
       }
       if(p.cat === 'cafe' && (st.cafes >= st.cafeMax || (!st.lunch && start < 14*60))) continue;
       if(kid && p.kid && p.cat === 'sight' && st.kidRun >= 2) continue;
-      if(p.cat !== 'food' && !st.lunch && t < MEAL.lunch[0] && end > MEAL.lunch[1] && hasFood(pool)) continue;
-      if(p.cat !== 'food' && !st.breakfast && t <= MEAL.breakfast[1] - 20 && hasFood(pool)) continue;   // 아침 먹기로 한 날은 아침부터
+      if(p.cat !== 'food' && !v.resv && lunchReachable && !lunchAfter(p, end)) continue;   // 여기 들러도 점심 식당에 제때 갈 수 있을 때만
+      if(p.cat !== 'food' && !v.resv && !st.breakfast && t <= W.breakfast[1] - 20 && hasFood(pool)) continue;   // 첫 끼(아침) 먹기로 한 날은 식당부터
       if(p.cat !== 'food' && dinnerReachable && !dinnerAfter(p, end)) continue;   // 여기 들러도 배웅 전 저녁 식당에 제때 갈 수 있을 때만
       const inCluster = cs.has(id);
       let score;
@@ -1099,6 +1150,11 @@ function fillSeg(date, t, pos, tg, pool, cs, rng, st){
         const toT = travelMin(p, tg.pt), slack = tg.by - (end + toT);
         if(toT < 20 && slack > 60) score += (slack - 60) * 0.3;          // 목적지 근처에 너무 일찍 가서 기다리지 않게
       } else score = travel + (inCluster ? 0 : 90) + rng()*10;
+      const nf = pend.filter(q => q !== p).sort((a2, b2) => resvOf(a2, st.ds).time - resvOf(b2, st.ds).time)[0];
+      if(nf && !st.minDrive){                                           // 고정 일정 전: 그 장소로 가는 길에서 고르기
+        const det = travel + travelMin(p, nf) - travelMin(pos, nf);
+        score = det * 2 + rng()*5;
+      }
       if(v.resv) score -= 60;
       if(p.must) score -= inCluster ? 80 : 40;
       if(p.fixDate === st.ds) score -= 150;                              // 이 날 고정 → 최우선
@@ -1107,12 +1163,15 @@ function fillSeg(date, t, pos, tg, pool, cs, rng, st){
       if(kid && p.kid) score -= 6;
       opts.push({ id, p, end, score });
     }
-    if(!opts.length) break;
-    opts.sort((a, b) => a.score - b.score);
-    const pick = opts[0], p = pick.p;
-    ids.push(pick.id); pool.delete(pick.id);
-    t = pick.end; pos = p;
-    if(p.cat === 'food'){ const s0 = pick.end - (+p.stay || 0); st.lastMeal = s0; if(!st.breakfast && s0 <= MEAL.breakfast[1]) st.breakfast = true; else if(!st.lunch && s0 <= MEAL.lunch[1]) st.lunch = true; else st.dinner = true; }
+    const list = opts.length ? opts : popts;                              // 갈 곳이 다 끝나면 포장 들를 곳
+    if(!list.length) break;
+    list.sort((a, b) => a.score - b.score);
+    const pk = list[0], p = pk.p;
+    ids.push(pk.id); pool.delete(pk.id);
+    t = pk.end; pos = p;
+    if(st.wrapId === p.id) st.wrapDone = true;
+    if(pick.has(p.id)) continue;
+    if(p.cat === 'food'){ const s0 = pk.end - stayOf(p, st.ds); st.lastMeal = s0; if(!st.breakfast && s0 <= W.breakfast[1]) st.breakfast = true; else if(!st.lunch && s0 <= W.lunch[1]) st.lunch = true; else st.dinner = true; }
     if(p.cat === 'cafe') st.cafes++;
     st.kidRun = p.kid && p.cat === 'sight' ? st.kidRun + 1 : 0;
   }
@@ -1121,7 +1180,8 @@ function fillSeg(date, t, pos, tg, pool, cs, rng, st){
 function buildDay(date, plan, pool, cs, rng){
   const ds0 = iso(date), ml = dayMeals(ds0);
   const st = { ds: ds0, de: dayEndM(ds0), meals: ml, indoor: !!dayOpt(ds0).indoor, minDrive: minDriveOn(ds0, plan), tripDates: new Set(dateRange(S.trip.start, S.trip.end).map(iso)),
-    breakfast: !ml.breakfast, lunch: !ml.lunch, dinner: ml.dinner === false, lastMeal: null, cafes:0, kidRun:0, cafeMax: (plan.end.by - plan.start.t) >= 9*60 ? 2 : 1 };
+    win: mealWins(ds0, plan.start.t), allPick: allPickupIds(), wrapId: dayOpt(ds0).wrap ? (dayFixed(ds0).slice().sort((a, b) => toMin(b.start) - toMin(a.start))[0] || {}).placeId : null, wrapDone: false,
+    breakfast: !ml.breakfast, lunch: !ml.lunch, dinner: ml.dinner === false || dinnerModeOf(ds0) === 'takeout' || dinnerModeOf(ds0) === 'none', lastMeal: null, cafes:0, kidRun:0, cafeMax: (plan.end.by - plan.start.t) >= 9*60 ? 2 : 1 };
   let t = plan.start.t, pos = plan.start.pt; const segs = [];
   for(const tg of [...plan.waypoints, plan.end]){
     const r = fillSeg(date, t, pos, tg, pool, cs, rng, st);
@@ -1144,14 +1204,15 @@ function simulateDay(date, plan, segIds){
       const travel = travelMin(pos, p), arrive = t + travel;
       const early = p.cat === 'food' && tg.stretch && arrive < 16*60 + 30 && arrive >= 15*60 + 45 && !stops.some(x => byId(x.id).cat === 'food' && x.start >= 15*60);
       const v = fitVisit(p, date, early ? 16*60 + 30 : arrive);
-      const start = v.ok ? v.start : arrive, end = start + (+p.stay || 0);
+      const start = v.ok ? v.start : arrive, end = start + stayOf(p, iso(date)), isPick = dayPickups(iso(date)).includes(p.id);
       if(early && v.ok) v.why = v.why || '저녁 시간';
       const rv = resvOf(p, iso(date)); if(rv && rv.time != null && Math.abs(start - rv.time) > 15) violations.push(`${p.name}: 예약 ${fmt(rv.time)}인데 코스 도착 ${fmt(start)}`);
       if(!v.ok) violations.push(`${p.name}: ${v.why === '휴무' ? WD[date.getDay()] + '요일 휴무' : v.why}`);
       if(p.cat === 'food'){
-        const inB = start >= MEAL.breakfast[0] && start <= MEAL.breakfast[1];
-        const inL = start >= MEAL.lunch[0]-30 && start <= MEAL.lunch[1];
-        const inD = start >= 16*60 + 30 && start <= MEAL.dinner[1];
+        const Wn = mealWins(iso(date), plan.start.t);
+        const inB = isPick || (start >= Math.min(MEAL.breakfast[0], Wn.breakfast[0]) && start <= Math.max(MEAL.breakfast[1], Wn.breakfast[1]));
+        const inL = start >= Math.min(MEAL.lunch[0]-30, Wn.lunch[0]) && start <= Math.max(MEAL.lunch[1], Wn.lunch[1]);
+        const inD = start >= Math.min(16*60 + 30, Wn.dinner[0]) && start <= Math.max(MEAL.dinner[1], Wn.dinner[1]);
         if(!inB && !inL && !inD) violations.push(`${p.name}: 식사시간이 아님(${fmt(start)})`);
       }
       if(kid){ kidRun = p.kid && p.cat === 'sight' ? kidRun + 1 : 0; if(kidRun >= 3) violations.push(`${p.name}: 아이 관광지 3연속`); }
@@ -1199,6 +1260,7 @@ function generate_(){
     const cj = assign[di];
     const cs = new Set(cj < k ? cands.filter((_, i) => A[i] === cj).map(p => p.id) : []);
     const day = makeDay(date, plans[di], buildDay(date, plans[di], pool, cs, rng));
+    dayFixed(day.plan.ds).forEach(f => { if(!day.ids.includes(f.placeId)) day.violations.push(`🕑 고정 일정 ${byId(f.placeId).name}(${f.start}~${f.end})을 넣지 못했어요 — 이동시간·영업시간을 확인해 주세요`); });
     cands.filter(p => p.fixDate === day.plan.ds && !day.ids.includes(p.id)).forEach(p => day.violations.push(`📅 ${p.name}: 이 날로 고정했지만 시간이 맞지 않아 못 넣었어요 (휴무·영업시간·식사시간 확인)`));
     return day;
   });
@@ -1289,6 +1351,7 @@ function renderCourse(){
   if(mustLeft.length) h += `<div class="warn">⭐ 꼭 넣기인데 시간이 모자라 빠진 곳: <b>${mustLeft.map(p => esc(p.name)).join(', ')}</b><br>다른 장소를 하나 빼거나 하루 여행시간을 늘려 보세요.</div>`;
   if(C.aiNote) h += `<div class="ai">✨ ${esc(C.aiNote)}</div>`;
   h += `<div class="row" style="margin:10px 0">
+      <button class="btn" onclick="go('req')">📝 요청사항</button>
       <button class="btn" onclick="S.seed++;generate_();renderCourse()">🔄 다른 코스 만들기</button>
       <button class="btn sea" onclick="aiRefine(this)">✨ AI로 순서 다듬기</button>
       ${S.excluded.length ? `<button class="btn ghost" onclick="S.excluded=[];save();generate_();renderCourse()">↩ 뺀 곳 되돌리기 (${S.excluded.length})</button>` : ''}
@@ -1328,10 +1391,12 @@ function renderCourse(){
       h += leg(prev, p, s.travel, s.wait > 0 ? ` · ${s.wait}분 대기(${s.why || '오픈 전'})` : '');
       h += `<div class="stop"><div class="time">${fmt(s.start)}–${fmt(s.end)}</div>
         <div class="grow"><div class="pname">${c.emoji} ${esc(p.name)}${p.kid?'<span class="badge">👶</span>':''}${p.must?'<span class="badge">⭐ 꼭</span>':''}</div>
-          <div class="muted">${c.label} · ${p.stay + (s.extra || 0)}분 머무름${s.extra ? ` (공항 시간 맞춰 +${s.extra}분)` : ''}</div>
+          ${dayPickups(ds).includes(p.id) ? '<span class="badge fix" style="margin-left:0">🥡 포장 들르기</span>' : ''}${dayFixed(ds).some(f => f.placeId === p.id) ? '<span class="badge fix" style="margin-left:0">🕑 고정 일정</span>' : ''}
+          <div class="muted">${c.label} · ${stayOf(p, ds) + (s.extra || 0)}분 머무름${s.extra ? ` (공항 시간 맞춰 +${s.extra}분)` : ''}</div>
           ${p.hours ? `<div class="muted" style="font-size:12px">🕘 ${esc(hoursSummary(p, true))}</div>` : ''}
           ${p.memo ? `<div class="pmemo">💬 ${esc(p.memo)}</div>` : ''}${p.fixDate === ds ? '<span class="badge fix" style="margin-left:0">📅 이 날 고정</span>' : ''}
           ${(() => { const rv = resvOf(p, ds); if(!rv) return ''; const cnt = pl.present.length - (sg.tg.kind === 'wp' ? 0 : 0);
+            if(rv.fixed) return `<div class="resv">🕑 고정 일정 <b>${fmt(rv.time)}~${fmt(rv.end ?? rv.time)}</b>${Math.abs(rv.time - s.start) > 15 ? ` · ⚠️ 코스 도착 ${fmt(s.start)}` : ''}</div>`;
             return `<div class="resv">📞 ${rv.time != null ? `예약 <b>${fmt(rv.time)}</b>${Math.abs(rv.time - s.start) > 15 ? ` · ⚠️ 코스 도착 ${fmt(s.start)}` : ' · 코스에 맞춰 짰어요'}` : `<b>${fmt(s.start)}</b>로 예약하세요`} · ${cnt ? cnt + '명' : ''}${resvKids(ds)}</div>`; })()}
           <div class="acts">
             ${memoBtn(k)}
@@ -1356,7 +1421,8 @@ function renderCourse(){
       }
       h += evRow(ds, { key:'dep', icon:'🛫', cls:'air', time: atAir, title:`공항 도착 · ${esc(f.label || '항공편')} ${f.dep} 출발`, sub:`${esc(flightWho(f))} · 공항 여유 ${dep - atAir}분` });
     } else {
-      h += evRow(ds, { key:'end', icon:'🏨', time: sg.arrive, title:`${esc(tg.pt.name)} 도착`, sub: tg.checkin ? `🧳 체크인 — 입실 ${tg.checkin}부터${sg.arrive < toMin(tg.checkin) ? ' · <b>입실 전 도착</b>' : ''}` : '' });
+      const dmode = dinnerModeOf(ds), dsub = dmode === 'takeout' ? `🥡 저녁은 숙소에서 (포장${dayPickups(ds).length ? ' — ' + dayPickups(ds).map(id => esc(byId(id).name)).join(', ') : ''})` : dmode === 'none' ? '저녁 일정 없음' : '';
+      h += evRow(ds, { key:'end', icon:'🏨', time: sg.arrive, title:`${esc(tg.pt.name)} 도착`, sub: [tg.checkin ? `🧳 체크인 — 입실 ${tg.checkin}부터${sg.arrive < toMin(tg.checkin) ? ' · <b>입실 전 도착</b>' : ''}` : '', dsub].filter(Boolean).join('<br>') });
     }
     prev = tg.pt;
   });
@@ -1401,7 +1467,7 @@ function resvListHtml(C){
 }
 function minDriveOn(ds, plan){ const o = dayOpt(ds); if(o.minDrive != null) return !!o.minDrive; return !!(plan && plan.waypoints && plan.waypoints.length); }
 function toggleMeal(ds, k, on){ setDayOpt(ds, { meals: { [k]: on } }); regen(); toast(`${MEAL_KO[k]} ${on ? '넣기' : '빼기'} — 다시 짰어요`); }
-function regen(){ const keep = S.day; generate_(); S.day = Math.min(keep, S.course.days.length - 1); renderCourse(); }
+function regen(){ const keep = S.day; generate_(); S.day = Math.min(keep, S.course.days.length - 1); if(curTab === 'course') renderCourse(); }
 function fixSelect(p, inCourse){
   const ds = dateRange(S.trip.start, S.trip.end);
   const out = p.fixDate && !ds.some(d => iso(d) === p.fixDate) ? `<option value="${p.fixDate}" selected>${dLabelS(p.fixDate)} (여행 기간 밖)</option>` : '';
@@ -1434,7 +1500,9 @@ function daySummary(d, i){
   return { day: i + 1, date: d.plan.ds, weekday: WD[d.date.getDay()], region: d.region,
     weather: w ? `${WTXT(w.code)} 강수${w.pop}% ${Math.round(w.tmin)}~${Math.round(w.tmax)}°` : '예보 없음',
     meals: Object.entries({ ...ml, dinner: ml.dinner === null ? !!S.trip.dinner : ml.dinner }).filter(x => x[1]).map(x => MEAL_KO[x[0]]).join('·') || '없음',
-    indoor_only: !!o.indoor, time: `${fmt(dayStartM(d.plan.ds))}~${fmt(dayEndM(d.plan.ds))}`,
+    indoor_only: !!o.indoor, time: `${fmt(dayStartM(d.plan.ds))}~${fmt(dayEndM(d.plan.ds))}`, meal_times: o.mealAt || {}, dinner_mode: dinnerModeOf(d.plan.ds),
+    fixed_events: dayFixed(d.plan.ds).map(f => `${byId(f.placeId).name} [${f.placeId}] ${f.start}~${f.end}`), go_lodging_after_fixed: !!o.wrap, pickups: dayPickups(d.plan.ds).map(id => byId(id).name),
+    lodging_night: (p => p ? `${p.name} [${p.id}]` : null)(stayPt(stayForNight(d.plan.ds))),
     fixed: [d.plan.start.pt.name + ' 출발', ...d.plan.waypoints.map(w2 => w2.title), d.plan.end.title + ' 도착'],
     stops: d.segs.flatMap(sg => sg.stops.map(st2 => { const p = byId(st2.id); return `${fmt(st2.start)} ${p.name} [${p.id}] ${CATS[p.cat].label}${isIndoor(p) ? '·실내' : '·실외'}`; })),
     drive: (() => { const s2 = dayStats(d); return `${durTxt(s2.min)} ${kmTxt(s2.km)}km`; })(), warnings: d.violations };
@@ -1453,6 +1521,10 @@ const CHAT_TOOLS = [
       breakfast:{ type:'boolean' }, lunch:{ type:'boolean' }, dinner:{ type:'boolean' },
       indoor_only:{ type:'boolean', description:'true면 실외 관광지를 빼고 실내 위주로' },
       min_drive:{ type:'boolean', description:'true면 운전(우회) 거리를 최소화' },
+      breakfast_time:{ type:'string', description:"첫 끼 시각 'HH:MM' 또는 'asap'(출발하자마자 식당부터)" },
+      lunch_time:{ type:'string', description:'점심 시각 HH:MM' }, dinner_time:{ type:'string', description:'저녁 시각 HH:MM' },
+      dinner_mode:{ type:'string', enum:['auto','restaurant','takeout','none'], description:'저녁: 자동/식당/포장해서 숙소/없음' },
+      go_lodging_after_fixed:{ type:'boolean', description:'마지막 고정 일정이 끝나면 다른 곳 들르지 않고 바로 숙소(포장 들를 곳은 들름)' },
       start:{ type:'string', description:'HH:MM 숙소 출발' }, end:{ type:'string', description:'HH:MM 숙소 도착 목표' } }, required:['day'] } },
   { name:'pin_place', description:'저장된 장소를 특정 날짜 코스에 꼭 넣기', parameters:{ type:'object', properties:{ place_id:{ type:'string' }, day:{ type:'integer' } }, required:['place_id','day'] } },
   { name:'unpin_place', description:'날짜 고정 해제', parameters:{ type:'object', properties:{ place_id:{ type:'string' } }, required:['place_id'] } },
@@ -1465,6 +1537,9 @@ const CHAT_TOOLS = [
       category:{ type:'string', enum:['food','cafe','sight','any'] }, radius_km:{ type:'number' } }, required:['query'] } },
   { name:'add_place', description:'search_places 결과(kakao_id)를 내 장소로 저장하고, day를 주면 그 날 코스에 꼭 넣기', parameters:{ type:'object', properties:{
       kakao_id:{ type:'string' }, day:{ type:'integer' }, stay_min:{ type:'integer' }, memo:{ type:'string' }, indoor:{ type:'boolean' } }, required:['kakao_id'] } },
+  { name:'set_fixed_event', description:'그 날 정해진 시간에 꼭 하는 일정(예약 등). 시작~끝 시간 동안 그 장소에 머묾', parameters:{ type:'object', properties:{ place_id:{ type:'string' }, day:{ type:'integer' }, start:{ type:'string', description:'HH:MM' }, end:{ type:'string', description:'HH:MM' } }, required:['place_id','day','start','end'] } },
+  { name:'remove_fixed_event', description:'고정 일정 지우기', parameters:{ type:'object', properties:{ place_id:{ type:'string' }, day:{ type:'integer' } }, required:['place_id','day'] } },
+  { name:'add_pickup', description:'숙소 가기 직전에 잠깐(기본 20분) 들러 포장·장보기할 곳', parameters:{ type:'object', properties:{ place_id:{ type:'string' }, day:{ type:'integer' }, stay_min:{ type:'integer' } }, required:['place_id','day'] } },
   { name:'get_weather', description:'여행 날짜 날씨 예보(오늘부터 16일까지만)', parameters:{ type:'object', properties:{} } },
   { name:'reshuffle', description:'같은 조건으로 다른 순서·조합의 코스 만들기', parameters:{ type:'object', properties:{} } }
 ];
@@ -1476,6 +1551,9 @@ async function runTool(name, a){
       const ds = dayDs(a.day); if(!ds) throw new Error('없는 DAY');
       const meals = {}; ['breakfast','lunch','dinner'].forEach(k => { if(a[k] != null) meals[k] = !!a[k]; });
       const patch = {}; if(Object.keys(meals).length) patch.meals = meals; if(a.indoor_only != null) patch.indoor = !!a.indoor_only; if(a.min_drive != null) patch.minDrive = !!a.min_drive;
+      const mat = {}; ['breakfast','lunch','dinner'].forEach(k => { if(a[k + '_time']) mat[k] = a[k + '_time']; }); if(Object.keys(mat).length) patch.mealAt = mat;
+      if(mat.breakfast) patch.meals = { ...(patch.meals || {}), breakfast: true };
+      if(a.dinner_mode) patch.dinnerMode = a.dinner_mode === 'auto' ? null : a.dinner_mode; if(a.go_lodging_after_fixed != null) patch.wrap = !!a.go_lodging_after_fixed;
       if(a.start) patch.start = a.start; if(a.end) patch.end = a.end;
       setDayOpt(ds, patch); regen(); return { ok: true, day: daySummary(C().days[dayIdx(a.day)], dayIdx(a.day)) };
     }
@@ -1508,6 +1586,10 @@ async function runTool(name, a){
       const d = a.day ? C().days[dayIdx(a.day)] : null;
       return { ok: true, place_id: p.id, in_course: d ? d.ids.includes(p.id) : null, note: p.hours ? '' : '영업시간 정보 없음 — 휴무일일 수 있으니 확인 권장', day: d ? daySummary(d, dayIdx(a.day)) : undefined };
     }
+    case 'set_fixed_event': { const p = placeArg(a.place_id), ds = dayDs(a.day); if(!ds) throw new Error('없는 DAY'); if(!(toMin(a.end) > toMin(a.start))) throw new Error('시간 확인'); setFixed(ds, p.id, a.start, a.end); regen(); const d = C().days[dayIdx(a.day)]; return { ok: d.ids.includes(p.id), day: daySummary(d, dayIdx(a.day)) }; }
+    case 'remove_fixed_event': { const ds = dayDs(a.day); S.trip.dayOpts[ds] = { ...dayOpt(ds), fixed: dayFixed(ds).filter(f => f.placeId !== a.place_id) }; const p = byId(a.place_id); if(p && p.fixDate === ds) p.fixDate = ''; save(); regen(); return { ok: true }; }
+    case 'add_pickup': { const p = placeArg(a.place_id), ds = dayDs(a.day); if(!ds) throw new Error('없는 DAY'); S.trip.dayOpts = S.trip.dayOpts || {};
+      S.trip.dayOpts[ds] = { ...dayOpt(ds), pickups: [...new Set([...dayPickups(ds), p.id])], ...(a.stay_min ? { pickupStay: +a.stay_min } : {}) }; if(p.fixDate === ds) p.fixDate = ''; save(); regen(); const d = C().days[dayIdx(a.day)]; return { ok: d.ids.includes(p.id), day: daySummary(d, dayIdx(a.day)) }; }
     case 'get_weather': { await loadWeather(true); return { days: S.course.days.map(d => ({ day: dayIdx(d.plan.ds) + 1, date: d.plan.ds, forecast: wxBadge(d.plan.ds, true).replace(/<[^>]+>/g, '') })) }; }
     case 'reshuffle': { S.seed++; regen(); return { ok: true, days: C().days.map(daySummary) }; }
   }
@@ -1583,6 +1665,141 @@ function renderChat(){
     <div class="ctips">${tips.map(t => `<button class="chip sm" onclick="sendChat(this.textContent)">${esc(t)}</button>`).join('')}</div>
     <div class="cinput"><input type="text" id="chatIn" placeholder="예: 둘째 날은 늦잠 자고 11시에 출발할래" onkeydown="if(event.key==='Enter'&&!event.isComposing)sendChat()" ${chatBusy ? 'disabled' : ''}><button class="btn primary" onclick="sendChat()" ${chatBusy ? 'disabled' : ''}>보내기</button></div>`;
   const b = document.getElementById('chatBody'); if(b) b.scrollTop = b.scrollHeight;
+}
+
+
+/* ---------- 📝 요청사항 → 코스 ----------
+   ① 여행 만들기 → ② 요청사항(날짜별 특이사항) → ③ AI 코스. 요청은 날짜별 설정(dayOpts)으로 바뀌고, 엔진이 그 설정을 지키며 코스를 짜요. */
+S.reqNote = ''; let reqBusy = false; const reqResults = {};
+function goReq(){
+  const T = S.trip;
+  if(!T.start || !T.end || T.end < T.start){ toast('여행 날짜를 확인해 주세요'); return; }
+  if(toMin(T.de) - toMin(T.ds) < 180){ toast('하루 여행시간이 너무 짧아요'); return; }
+  S.seed = 1; generate_(); go('req');
+}
+function setReq(key, v){ S.trip.requests = S.trip.requests || { general:'', days:{} }; if(key === 'general') S.trip.requests.general = v; else S.trip.requests.days[key] = v; save(); }
+const reqText = ds => ((S.trip.requests || {}).days || {})[ds] || '';
+function fixedSummary(pl){
+  const a = pl.pre.map(e => `${e.icon} ${fmt(e.time)} ${e.title.replace(/<[^>]+>/g, '')}`);
+  pl.waypoints.forEach(w => a.push(`${w.icon} ${fmt(w.by)}까지 ${w.title.replace(/<[^>]+>/g, '')}`));
+  a.push(`${pl.end.kind === 'stay' ? '🏨' : '✈️'} ${pl.end.kind === 'stay' ? pl.end.pt.name + ' 도착' : pl.end.title + ' ' + fmt(pl.end.by) + '까지'}`);
+  return a.join(' → ');
+}
+function placeOptions(sel, filter){
+  return S.places.filter(p => p.cat !== 'stay' && (!filter || filter(p))).sort((a, b) => a.name.localeCompare(b.name, 'ko')).map(p => `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${CATS[p.cat].emoji} ${esc(p.name)}</option>`).join('');
+}
+function renderReq(){
+  const el = document.getElementById('reqArea'); if(!el) return;
+  if(!S.course){ el.innerHTML = '<h2>📝 요청사항</h2><div class="card"><button class="btn primary" onclick="goReq()">요청사항 적기 시작</button></div>'; return; }
+  const R0 = S.trip.requests || { general:'', days:{} };
+  let h = `<h2>📝 요청사항</h2>
+    <div class="card"><div class="muted" style="font-size:13px">날짜마다 꼭 할 일·예약·식사·특이사항을 적어 주세요. <b>✨ AI로 반영</b>을 누르면 글을 읽어 아래 설정으로 바꿔요(OpenAI 키 필요). 키가 없으면 설정을 직접 고르면 돼요. 그다음 <b>코스 만들기</b>를 누르면 이 설정을 지키며 코스를 짜요.</div>
+      <label class="f">여행 전체 요청 (선택)</label>
+      <textarea onchange="setReq('general',this.value)" placeholder="예: 아이가 6살이라 하루 관광지는 3곳 정도, 오름은 하나만">${esc(R0.general || '')}</textarea></div>`;
+  S.course.days.forEach((d, i) => {
+    const ds = d.plan.ds, o = dayOpt(ds), ml = dayMeals(ds), at = o.mealAt || {}, fx = dayFixed(ds), pk = dayPickups(ds), dm = dinnerModeOf(ds);
+    const night = stayPt(stayForNight(ds));
+    h += `<div class="card reqday"><h3>DAY ${i+1} <span class="muted" style="font-weight:400">${dLabel(d.date)} ${wxBadge(ds)}</span></h3>
+      <div class="muted" style="font-size:12px">고정: ${esc(fixedSummary(d.plan))}</div>
+      <textarea style="margin-top:6px" onchange="setReq('${ds}',this.value)" placeholder="${i === 0 ? '예: 렌터카 픽업 후 바로 식당부터 가서 배 채우고, 점심은 1시쯤' : '예: 14:20 ○○ 예약, 16:20까지. 끝나면 바로 숙소로. 저녁은 하나로마트에서 회 포장해서 숙소에서'}">${esc(reqText(ds))}</textarea>
+      <div class="reqrow"><b>🕑 고정 일정</b>${fx.map(f => `<span class="reqchip">${esc(byId(f.placeId).name)} ${f.start}~${f.end}<button onclick="delFixed('${ds}','${f.placeId}')">✕</button></span>`).join('') || '<span class="muted">없음</span>'}</div>
+      <div class="reqrow" style="border-top:0;padding-top:0">
+        <select id="fxp_${ds}"><option value="">장소 선택</option>${placeOptions('')}</select>
+        <input type="time" id="fxs_${ds}"> ~ <input type="time" id="fxe_${ds}"><button class="btn xs" onclick="addFixed('${ds}')">추가</button>
+        <button class="btn xs ghost" onclick="reqSearchOpen('${ds}','fixed')">🔎 저장 안 한 곳 찾기</button></div>
+      ${fx.length ? `<div class="reqrow"><b>🏁 끝나면</b><label><input type="checkbox" ${o.wrap ? 'checked' : ''} onchange="setDayOpt('${ds}',{wrap:this.checked});renderReq()"> 마지막 고정 일정 후 바로 숙소로</label></div>` : ''}
+      <div class="reqrow"><b>🍳 첫 끼</b><label><input type="checkbox" ${ml.breakfast ? 'checked' : ''} onchange="setDayOpt('${ds}',{meals:{breakfast:this.checked}});renderReq()"> 넣기</label>
+        ${ml.breakfast ? `<select onchange="setDayOpt('${ds}',{mealAt:{breakfast:this.value}})"><option value="asap" ${at.breakfast === 'asap' ? 'selected' : ''}>출발하자마자 식당부터</option>${['08:00','08:30','09:00','09:30','10:00'].map(t => `<option ${at.breakfast === t ? 'selected' : ''}>${t}</option>`).join('')}<option value="" ${!at.breakfast ? 'selected' : ''}>아침 시간(7:30~10:30) 아무 때</option></select>` : ''}</div>
+      <div class="reqrow"><b>🍚 점심</b><label><input type="checkbox" ${ml.lunch ? 'checked' : ''} onchange="setDayOpt('${ds}',{meals:{lunch:this.checked}});renderReq()"> 넣기</label>
+        ${ml.lunch ? `<input type="time" value="${at.lunch || ''}" onchange="setDayOpt('${ds}',{mealAt:{lunch:this.value}})"><span class="muted">비우면 11:30~14:00</span>` : ''}</div>
+      <div class="reqrow"><b>🍽 저녁</b><select onchange="setDayOpt('${ds}',{dinnerMode:this.value==='auto'?null:this.value});renderReq()">
+          ${[['auto','자동'],['restaurant','식당에서'],['takeout','포장해서 숙소에서'],['none','넣지 않기']].map(([v, l]) => `<option value="${v}" ${dm === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        ${dm === 'restaurant' ? `<input type="time" value="${at.dinner || ''}" onchange="setDayOpt('${ds}',{mealAt:{dinner:this.value}})"><span class="muted">비우면 17:30~19:30</span>` : ''}</div>
+      ${dm === 'takeout' || pk.length ? `<div class="reqrow"><b>🥡 포장 들를 곳</b>${pk.map(id => `<span class="reqchip">${esc(byId(id).name)}<button onclick="delPickup('${ds}','${id}')">✕</button></span>`).join('') || '<span class="muted">없음</span>'}
+        <select onchange="if(this.value)addPickup('${ds}',this.value)"><option value="">저장한 곳에서 추가</option>${placeOptions('', p => !pk.includes(p.id))}</select>
+        <button class="btn xs ghost" onclick="reqSearchOpen('${ds}','pick')">🔎 ${night ? esc(night.name) + ' 근처에서' : ''} 찾기</button></div>` : ''}
+      ${reqResults[ds] ? reqResultsHtml(ds) : ''}
+      <div class="reqrow"><b>⏰ 시간</b><input type="time" value="${o.start || ''}" placeholder="${S.trip.ds}" onchange="setDayOpt('${ds}',{start:this.value})"> ~ <input type="time" value="${o.end || ''}" onchange="setDayOpt('${ds}',{end:this.value})"><span class="muted">비우면 ${S.trip.ds}~${S.trip.de}</span></div>
+      <div class="reqrow"><b>기타</b><button class="chip sm ${o.indoor ? 'on' : ''}" onclick="setDayOpt('${ds}',{indoor:${!o.indoor}});renderReq()">☔ 실내 위주</button>
+        <button class="chip sm ${minDriveOn(ds, d.plan) ? 'on' : ''}" onclick="setDayOpt('${ds}',{minDrive:${!minDriveOn(ds, d.plan)}});renderReq()">🚗 운전 최소화</button></div>
+    </div>`;
+  });
+  if(S.reqNote) h += `<div class="ai" style="white-space:pre-wrap">✨ ${esc(S.reqNote)}</div>`;
+  h += `<div class="row" style="margin:10px 0 30px">
+      <button class="btn sea" onclick="applyRequestsAI(this)" ${reqBusy ? 'disabled' : ''}>${reqBusy ? '✨ 읽는 중…' : '✨ AI로 요청 반영'}</button>
+      ${undoStack.length ? '<button class="btn ghost" onclick="undoChat();renderReq()">↩ 되돌리기</button>' : ''}
+      <button class="btn primary grow" onclick="makeCourse()">이 요청대로 코스 만들기 →</button></div>`;
+  el.innerHTML = h;
+}
+function addFixed(ds){
+  const pid = document.getElementById('fxp_' + ds).value, st = document.getElementById('fxs_' + ds).value, en = document.getElementById('fxe_' + ds).value;
+  if(!pid || !st || !en || toMin(en) <= toMin(st)){ toast('장소와 시작·끝 시간을 넣어 주세요'); return; }
+  setFixed(ds, pid, st, en); renderReq(); toast('고정 일정을 넣었어요');
+}
+function setFixed(ds, pid, st, en){
+  const fx = (dayOpt(ds).fixed || []).filter(f => f.placeId !== pid); fx.push({ placeId: pid, start: st, end: en });
+  fx.sort((a, b) => toMin(a.start) - toMin(b.start)); S.trip.dayOpts = S.trip.dayOpts || {};
+  S.trip.dayOpts[ds] = { ...dayOpt(ds), fixed: fx }; const p = byId(pid); p.fixDate = ds; S.excluded = S.excluded.filter(x => x !== pid); save();
+}
+function delFixed(ds, pid){ S.trip.dayOpts[ds] = { ...dayOpt(ds), fixed: dayFixed(ds).filter(f => f.placeId !== pid) }; const p = byId(pid); if(p && p.fixDate === ds) p.fixDate = ''; save(); renderReq(); }
+function addPickup(ds, pid){ S.trip.dayOpts = S.trip.dayOpts || {}; S.trip.dayOpts[ds] = { ...dayOpt(ds), pickups: [...new Set([...dayPickups(ds), pid])] }; S.excluded = S.excluded.filter(x => x !== pid); save(); renderReq(); }
+function delPickup(ds, pid){ S.trip.dayOpts[ds] = { ...dayOpt(ds), pickups: dayPickups(ds).filter(x => x !== pid) }; save(); renderReq(); }
+function reqSearchOpen(ds, kind){
+  const q = prompt(kind === 'pick' ? '어디를 찾을까요? (예: 하나로마트, 회 포장, 김밥)' : '어디를 찾을까요? (예: 제주온쉼, 승마체험)'); if(!q) return;
+  if(!kakaoReady){ toast('카카오 키를 연결해야 검색할 수 있어요'); return; }
+  const d = S.course.days.find(x => x.plan.ds === ds), night = stayPt(stayForNight(ds));
+  const at = kind === 'pick' && night ? night : d.plan.end.pt;
+  new kakao.maps.services.Places().keywordSearch(q, (data, st) => { reqResults[ds] = { kind, items: st === kakao.maps.services.Status.OK ? data.slice(0, 6) : [] }; renderReq(); },
+    kind === 'pick' ? { location: new kakao.maps.LatLng(at.lat, at.lng), radius: 15000, sort: kakao.maps.services.SortBy.DISTANCE } : {});
+}
+function reqResultsHtml(ds){
+  const r = reqResults[ds]; if(!r.items.length) return `<div class="reqrow muted">검색 결과가 없어요 <button class="btn xs ghost" onclick="delete reqResults['${ds}'];renderReq()">닫기</button></div>`;
+  return `<div class="reqrow" style="flex-direction:column;align-items:stretch">${r.items.map((x, k) => `<div class="row"><span class="grow">${esc(x.place_name)} <span class="muted">${esc(x.category_name.split('>').pop().trim())}${x.distance ? ' · ' + (x.distance / 1000).toFixed(1) + 'km' : ''}</span></span><button class="btn xs primary" onclick="reqPick('${ds}',${k})">${r.kind === 'pick' ? '포장 들를 곳으로' : '선택'}</button></div>`).join('')}<button class="btn xs ghost" onclick="delete reqResults['${ds}'];renderReq()">닫기</button></div>`;
+}
+function reqPick(ds, k){
+  const r = reqResults[ds], x = r.items[k];
+  let p = S.places.find(q => q.placeId === x.id);
+  if(!p){ p = makePlace({ name: x.place_name, cat: mapCat(x), lat: x.y, lng: x.x, addr: x.road_address_name || x.address_name, placeId: x.id, catName: x.category_name }); S.places.push(p); }
+  delete reqResults[ds]; save();
+  if(r.kind === 'pick') addPickup(ds, p.id);
+  else { renderReq(); const sel = document.getElementById('fxp_' + ds); if(sel) sel.value = p.id; toast('시작·끝 시간을 넣고 추가를 누르세요'); }
+}
+const REQ_SYS = `너는 제주 가족여행 코스를 짜기 "전에" 사용자의 요청사항을 앱 설정으로 옮기는 비서야. 코스는 나중에 앱이 이 설정을 지키며 짜.
+- DAY 번호는 context.days의 day. "10월29일" 같은 날짜는 date로 맞춰.
+- "14시20분 예약해서 16시20분까지 ○○" → saved_places에서 이름으로 찾고(비슷하면 OK), 없으면 search_places(query) → 가장 맞는 결과를 add_place(day 없이) → set_fixed_event(place_id, day, start, end).
+- "끝나면 바로 숙소", "숙소 첫 방문이라 일찍 들어가기" → set_day_options(go_lodging_after_fixed=true).
+- "저녁은 포장해서 숙소에서" → set_day_options(dinner_mode='takeout'). 포장할 곳이 구체적이면(예: 하나로마트 회) search_places(query, near_place_id=그날 밤 숙소 id) → add_place → add_pickup. "근처에서 음식 포장"처럼 가게가 안 정해졌으면 pickup은 넣지 말고, 요약에서 "포장할 가게는 요청사항 화면의 🔎 찾기나 코스 대화로 골라 주세요"라고 안내해.
+- "도착(렌터카 픽업) 후 바로 식당" → set_day_options(breakfast=true, breakfast_time='asap'). "점심은 1시쯤" → lunch_time='13:00'. "저녁 6시 식당" → dinner_mode='restaurant', dinner_time='18:00'.
+- "늦잠, 11시 출발" → start. "어두워지기 전에 숙소" → end(예: '17:30').
+- 비행기·렌터카·배웅 시간은 여기서 못 바꿔(여행 만들기 탭).
+- 끝나면 날짜별로 무엇을 설정했는지 짧게 요약하고, 못 한 것은 이유를 말해. 평점·맛은 지어내지 마.`;
+async function applyRequestsAI(btn){
+  const Rq = S.trip.requests || { general:'', days:{} };
+  const texts = S.course.days.map((d, i) => reqText(d.plan.ds).trim() ? `DAY ${i+1} (${d.plan.ds}, ${WD[d.date.getDay()]}): ${reqText(d.plan.ds).trim()}` : '').filter(Boolean);
+  if(!texts.length && !(Rq.general || '').trim()){ toast('요청사항을 먼저 적어 주세요'); return; }
+  if(!S.settings.openaiKey){ toast('⚙️ 설정에 OpenAI 키를 넣으면 글을 읽어 반영해요. 지금은 아래 설정을 직접 골라 주세요'); return; }
+  reqBusy = true; renderReq(); pushUndo();
+  const ctx = { days: S.course.days.map((d, i) => ({ day: i + 1, date: d.plan.ds, weekday: WD[d.date.getDay()], fixed_schedule: fixedSummary(d.plan),
+      lodging_morning: (p => p ? { id: p.id, name: p.name } : null)(stayPt(stayForMorning(d.plan.ds))), lodging_night: (p => p ? { id: p.id, name: p.name } : null)(stayPt(stayForNight(d.plan.ds))),
+      current: dayOpt(d.plan.ds) })),
+    saved_places: S.places.filter(p => p.cat !== 'stay').map(p => `${p.name} [${p.id}] ${CATS[p.cat].label} ${regionOf(p)}`), people: S.trip.people.map(p => p.name + (p.age !== '' ? `(${p.age}세)` : '')).join(', ') };
+  const msgs = [{ role:'system', content: REQ_SYS }, { role:'system', content: 'context: ' + JSON.stringify(ctx) },
+    { role:'user', content: [(Rq.general || '').trim() ? '전체: ' + Rq.general.trim() : '', ...texts].filter(Boolean).join('\n') }];
+  let changed = false;
+  try{
+    for(let step = 0; step < 14; step++){
+      const r = await fetch('https://api.openai.com/v1/chat/completions', { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + S.settings.openaiKey },
+        body: JSON.stringify({ model: S.settings.model || 'gpt-4o-mini', temperature: 0.2, messages: msgs, tools: CHAT_TOOLS.map(f => ({ type:'function', function: f })) }) });
+      if(!r.ok) throw new Error('OpenAI ' + r.status + ' ' + (await r.text()).slice(0, 120));
+      const m = (await r.json()).choices[0].message; msgs.push(m);
+      if(!m.tool_calls || !m.tool_calls.length){ S.reqNote = m.content || '반영했어요.'; break; }
+      for(const tc of m.tool_calls){
+        let out; try{ out = await runTool(tc.function.name, JSON.parse(tc.function.arguments || '{}')); if(!/search|weather/.test(tc.function.name)) changed = true; }catch(e){ out = { error: e.message }; }
+        msgs.push({ role:'tool', tool_call_id: tc.id, content: JSON.stringify(out).slice(0, 5000) });
+      }
+    }
+  }catch(e){ S.reqNote = '⚠️ ' + e.message; }
+  finally{ reqBusy = false; if(!changed) undoStack.pop(); renderReq(); }
 }
 
 /* ---------- 5단계: AI 순서 보정 (구간별) ---------- */
