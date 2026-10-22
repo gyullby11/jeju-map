@@ -362,11 +362,21 @@ function takeDays(line){
 const T_RANGE = /(\d{1,2})\s*:\s*(\d{2})\s*[~\-–]\s*(익일\s*)?(\d{1,2})\s*:\s*(\d{2})/g;
 function ranges(str){ const out = []; let m; T_RANGE.lastIndex = 0; while((m = T_RANGE.exec(str))){ let e = (+m[4]) * 60 + (+m[5]); const st = (+m[1]) * 60 + (+m[2]); if(m[3] || e <= st) e = 24 * 60; out.push([`${pad2(m[1])}:${m[2]}`, e >= 1440 ? '24:00' : `${pad2(m[4])}:${m[5]}`]); } return out; }
 const RE_BREAK = /브레이크|휴게\s*시간|break|쉬는\s*시간/i, RE_LO = /라스트\s*오더|L\s*\.?\s*O\b|주문\s*마감|입장\s*마감|매표\s*마감/i, RE_CLOSED = /휴무|휴일|휴관|휴점|정기\s*휴|쉽니다|closed/i;
+/* 휴무 문구에서 요일만 뽑기 — '매일·휴무일·공휴일·매월' 같은 말 속 글자는 요일로 안 봄 */
+function closedDaysIn(str){
+  let t = ' ' + str.replace(/매일|연중무휴|휴무일|공휴일|휴일|매월|매주|정기|임시|휴무|휴관|휴점|쉽니다|closed/gi, ' ')
+    .replace(/주말/g, ' 토,일 ').replace(/평일/g, ' 월,화,수,목,금 ') + ' ';
+  const out = new Set();
+  for(const m of t.matchAll(/(?<=[\s,·\/(:및])([월화수목금토일])(?:요일)?(?=[\s,·\/):및~\-]|$)/g)) out.add(DOWC[m[1]]);
+  const rg = t.match(/(?<=[\s(:])([월화수목금토일])(?:요일)?\s*[~\-]\s*([월화수목금토일])(?:요일)?(?=[\s,)]|$)/);
+  if(rg){ let i = ORDER.indexOf(DOWC[rg[1]]); const j = ORDER.indexOf(DOWC[rg[2]]); for(let k = 0; k < 7; k++){ out.add(ORDER[i]); if(i === j) break; i = (i + 1) % 7; } }
+  return [...out];
+}
 function parseHours(text, year){
   const H = { days: {}, nth: [], dates: [], note: '' };
   const day = d => (H.days[d] = H.days[d] || { open:'', close:'', breaks:[], lo:'', closed:false });
   const ALL = new Set([0,1,2,3,4,5,6]);
-  let cur = null, pending = null, found = false;
+  let cur = null, pending = null, found = false; const closedSet = new Set();
   const lines = String(text).replace(/\r/g, '').replace(/[～〜]/g, '~').replace(/：/g, ':').split(/\n+/).map(l => l.trim()).filter(Boolean);
   for(const raw of lines){
     if(/^(영업\s*시간|운영\s*시간|영업\s*정보|더보기|접기|오늘|영업\s*중|영업\s*전|영업\s*종료|곧\s*영업)$/.test(raw)) continue;
@@ -381,13 +391,17 @@ function parseHours(text, year){
     pending = null;
     if(isClosed){
       let any = false;
-      const wk = rest.match(/매주\s*((?:[월화수목금토일](?:요일)?\s*[,·\/및]?\s*)+)/);
-      if(wk){ [...wk[1].replace(/요일/g, '').matchAll(/[월화수목금토일]/g)].forEach(x => { day(DOWC[x[0]]).closed = true; }); any = true; }
-      const nth = rest.match(/((?:첫|둘|셋|넷|다섯|마지막|\d)\s*(?:째|번째)?(?:\s*[,·및]\s*(?:첫|둘|셋|넷|다섯|마지막|\d)\s*(?:째|번째)?)*)\s*(?:주|번째\s*주)\s*([월화수목금토일])/);
-      if(nth){ const map = { 첫:1, 둘:2, 셋:3, 넷:4, 다섯:5, 마지막:-1 }; const n = [...nth[1].matchAll(/첫|둘|셋|넷|다섯|마지막|\d/g)].map(x => map[x[0]] ?? +x[0]); H.nth.push({ n, dow: DOWC[nth[2]] }); any = true; }
-      [...rest.matchAll(/(\d{1,2})\s*(?:월|\/|\.)\s*(\d{1,2})\s*일?/g)].forEach(x => { const m = +x[1], d = +x[2]; if(m >= 1 && m <= 12 && d >= 1 && d <= 31){ H.dates.push(`${year}-${pad2(m)}-${pad2(d)}`); any = true; } });
-      if(/공휴일/.test(rest)){ H.note = '공휴일 휴무'; any = true; }
-      if(days && !rs.length && !wk && !nth){ days.forEach(d => { day(d).closed = true; }); any = true; }
+      // 휴무 부분만 떼어 읽기: 괄호 안 "(매주 수요일 휴무)" 또는 시간을 뺀 나머지
+      let cp = (rest.match(/\(([^)]*(?:휴무|휴관|휴일|휴점|쉽니다|closed)[^)]*)\)/i) || [])[1] || rest.replace(T_RANGE, ' ').replace(/\d{1,2}\s*:\s*\d{2}/g, ' ');
+      const wk = null;
+      const nth = cp.match(/((?:첫|둘|셋|넷|다섯|마지막|\d)\s*(?:째|번째)?(?:\s*[,·및]\s*(?:첫|둘|셋|넷|다섯|마지막|\d)\s*(?:째|번째)?)*)\s*(?:주|번째\s*주)\s*([월화수목금토일])/);
+      if(nth){ const map = { 첫:1, 둘:2, 셋:3, 넷:4, 다섯:5, 마지막:-1 }; const n = [...nth[1].matchAll(/첫|둘|셋|넷|다섯|마지막|\d/g)].map(x => map[x[0]] ?? +x[0]); H.nth.push({ n, dow: DOWC[nth[2]] }); any = true; cp = cp.replace(nth[0], ' '); }
+      [...cp.matchAll(/(\d{1,2})\s*(?:월|\/|\.)\s*(\d{1,2})\s*일?/g)].forEach(x => { const m = +x[1], d = +x[2]; if(m >= 1 && m <= 12 && d >= 1 && d <= 31){ H.dates.push(`${year}-${pad2(m)}-${pad2(d)}`); any = true; } });
+      cp = cp.replace(/(\d{1,2})\s*(?:월|\/|\.)\s*(\d{1,2})\s*일?/g, ' ');
+      if(/공휴일/.test(cp)){ H.note = '공휴일 휴무'; any = true; }
+      const wd = closedDaysIn(cp);                                       // "매주 수요일", "일, 월", "휴무일: 일요일", "토·일 휴무", "주말 휴무"
+      wd.forEach(d => closedSet.add(d)); if(wd.length) any = true;
+      if(days && !rs.length && !wd.length && !nth){ days.forEach(d => closedSet.add(d)); any = true; }
       if(any) found = true;
       if(!rs.length) continue;
     }
@@ -411,6 +425,7 @@ function parseHours(text, year){
     }
   }
   // 브레이크·라스트오더만 있고 영업시간 줄이 없는 요일은 정리
+  closedSet.forEach(d => { day(d).closed = true; });                  // 휴무는 맨 마지막에 적용 (뒤에 나온 "매일 …"이 지우지 못하게)
   Object.values(H.days).forEach(x => { x.breaks = x.breaks.filter((b, i, a) => a.findIndex(y => y[0] === b[0] && y[1] === b[1]) === i); });
   H.dates = [...new Set(H.dates)];
   return found ? H : null;
@@ -487,6 +502,13 @@ function fitVisit(p, date, arrive){
   if(h.close != null && (food ? start > h.close - 30 : end > h.close)) return { ok:false, why:'영업 종료' };
   return { ok:true, start, end, wait: start - arrive, why };
 }
+function dayHoursTxt(p, date){
+  if(!p.hours) return '';
+  const h = dayHours(p, date), w = WD[date.getDay()];
+  if(h.closed) return `${w} 휴무`;
+  if(h.open == null) return `${w} 영업시간 정보 없음`;
+  return `${w} ${fmt(h.open)}–${h.close != null ? fmt(h.close) : '?'}` + h.breaks.map(b => ` · 브레이크 ${fmt(b[0])}–${fmt(b[1])}`).join('') + (h.lo != null ? ` · L.O ${fmt(h.lo)}` : '');
+}
 function hoursSummary(p, short){
   const H = p.hours; if(!H) return '';
   const fmtD = x => !x ? '?' : x.closed ? 'X' : [x.open || '?', x.close || '?', (x.breaks || []).map(b => b.join('–')).join(', '), x.lo || ''].join('|');
@@ -513,7 +535,7 @@ function hoursSummary(p, short){
 function makePlace(o){
   const cat = o.cat || 'sight';
   return { id: o.id || uid(), name: o.name, cat, kid: !!o.kid, must: !!o.must, addr: o.addr || '', lat: +o.lat, lng: +o.lng,
-    placeId: o.placeId || '', stay: o.stay ?? CATS[cat].stay, hours: o.hours || legacyHours(o), hoursRaw: o.hoursRaw || '', _stayEdited: !!o._stayEdited, indoor: o.indoor ?? null, catName: o.catName || '',
+    placeId: o.placeId || '', stay: o.stay ?? CATS[cat].stay, hours: o.hours || legacyHours(o), hoursRaw: o.hoursRaw || '', hoursV: o.hoursV || 1, _stayEdited: !!o._stayEdited, indoor: o.indoor ?? null, catName: o.catName || '',
     sample: !!o.sample, approx: !!o.approx, memo: o.memo || '', fixDate: o.fixDate || '' };
 }
 
@@ -772,7 +794,7 @@ async function applyHoursPaste(id, taId){
   let H = parseHours(text, (S.trip.start || iso(new Date())).slice(0, 4));
   if(!H && S.settings.openaiKey){ toast('AI로 읽는 중…'); H = await aiParseHours(text).catch(() => null); }
   if(!H){ toast('영업시간을 못 읽었어요. 요일별로 직접 고쳐 주세요'); return; }
-  p.hours = H; p.hoursRaw = text; save();
+  p.hours = H; p.hoursRaw = text; p.hoursV = 2; save();
   S.pasteFor = null; if(lastResults.length) renderResults(); renderMapTab();
   toast('🕘 ' + hoursSummary(p, true));
 }
@@ -1393,7 +1415,7 @@ function renderCourse(){
         <div class="grow"><div class="pname">${c.emoji} ${esc(p.name)}${p.kid?'<span class="badge">👶</span>':''}${p.must?'<span class="badge">⭐ 꼭</span>':''}</div>
           ${dayPickups(ds).includes(p.id) ? '<span class="badge fix" style="margin-left:0">🥡 포장 들르기</span>' : ''}${dayFixed(ds).some(f => f.placeId === p.id) ? '<span class="badge fix" style="margin-left:0">🕑 고정 일정</span>' : ''}
           <div class="muted">${c.label} · ${stayOf(p, ds) + (s.extra || 0)}분 머무름${s.extra ? ` (공항 시간 맞춰 +${s.extra}분)` : ''}</div>
-          ${p.hours ? `<div class="muted" style="font-size:12px">🕘 ${esc(hoursSummary(p, true))}</div>` : ''}
+          ${p.hours ? `<div class="muted" style="font-size:12px">🕘 그날 ${esc(dayHoursTxt(p, d.date))}</div>` : ((p.cat === 'food' || p.cat === 'cafe') ? '<div class="muted" style="font-size:12px;color:#c2410c">🕘 영업시간 없음 — 휴무일 확인 안 됨</div>' : '')}
           ${p.memo ? `<div class="pmemo">💬 ${esc(p.memo)}</div>` : ''}${p.fixDate === ds ? '<span class="badge fix" style="margin-left:0">📅 이 날 고정</span>' : ''}
           ${(() => { const rv = resvOf(p, ds); if(!rv) return ''; const cnt = pl.present.length - (sg.tg.kind === 'wp' ? 0 : 0);
             if(rv.fixed) return `<div class="resv">🕑 고정 일정 <b>${fmt(rv.time)}~${fmt(rv.end ?? rv.time)}</b>${Math.abs(rv.time - s.start) > 15 ? ` · ⚠️ 코스 도착 ${fmt(s.start)}` : ''}</div>`;
@@ -1702,7 +1724,7 @@ function renderReq(){
     h += `<div class="card reqday"><h3>DAY ${i+1} <span class="muted" style="font-weight:400">${dLabel(d.date)} ${wxBadge(ds)}</span></h3>
       <div class="muted" style="font-size:12px">고정: ${esc(fixedSummary(d.plan))}</div>
       <textarea style="margin-top:6px" onchange="setReq('${ds}',this.value)" placeholder="${i === 0 ? '예: 렌터카 픽업 후 바로 식당부터 가서 배 채우고, 점심은 1시쯤' : '예: 14:20 ○○ 예약, 16:20까지. 끝나면 바로 숙소로. 저녁은 하나로마트에서 회 포장해서 숙소에서'}">${esc(reqText(ds))}</textarea>
-      <div class="reqrow"><b>🕑 고정 일정</b>${fx.map(f => `<span class="reqchip">${esc(byId(f.placeId).name)} ${f.start}~${f.end}<button onclick="delFixed('${ds}','${f.placeId}')">✕</button></span>`).join('') || '<span class="muted">없음</span>'}</div>
+      <div class="reqrow"><b>🕑 고정 일정</b>${fx.map(f => `<span class="reqchip">${dayHours(byId(f.placeId), d.date).closed ? '⚠️ 이 날 휴무 · ' : ''}${esc(byId(f.placeId).name)} ${f.start}~${f.end}<button onclick="delFixed('${ds}','${f.placeId}')">✕</button></span>`).join('') || '<span class="muted">없음</span>'}</div>
       <div class="reqrow" style="border-top:0;padding-top:0">
         <select id="fxp_${ds}"><option value="">장소 선택</option>${placeOptions('')}</select>
         <input type="time" id="fxs_${ds}"> ~ <input type="time" id="fxe_${ds}"><button class="btn xs" onclick="addFixed('${ds}')">추가</button>
@@ -2056,6 +2078,21 @@ function clearAll(){
 
 /* ---------- 시작 ---------- */
 if(!S.places) loadSample(false);
+(function fixClosedDays(){          // 예전 인식기가 놓친 휴무(예: "매일 … (매주 수요일 휴무)")를 한 번만 보충 — 직접 고친 시간은 그대로
+  let n = 0; const yr = (S.trip.start || iso(new Date())).slice(0, 4);
+  S.places.forEach(p => {
+    if(p.hoursV >= 2) return; p.hoursV = 2;
+    if(!p.hoursRaw) return;
+    const H = parseHours(p.hoursRaw, yr); if(!H) return;
+    if(!p.hours){ p.hours = H; n++; return; }
+    let ch = false;
+    Object.entries(H.days).forEach(([d, x]) => { if(x.closed && !(p.hours.days[d] || {}).closed){ p.hours.days[d] = { ...(p.hours.days[d] || {}), closed: true }; ch = true; } });
+    H.nth.forEach(r => { if(!(p.hours.nth || []).some(q => q.dow === r.dow)){ (p.hours.nth = p.hours.nth || []).push(r); ch = true; } });
+    H.dates.forEach(d2 => { if(!(p.hours.dates || []).includes(d2)){ (p.hours.dates = p.hours.dates || []).push(d2); ch = true; } });
+    if(ch) n++;
+  });
+  saveLocal(); if(n) setTimeout(() => toast(`🕘 ${n}곳의 휴무일을 다시 확인해서 고쳤어요`), 800);
+})();
 takeSnap();
 go('map');
 setSync(syncOn() ? 'busy' : '');
